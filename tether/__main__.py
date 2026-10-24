@@ -22,6 +22,7 @@ def main(argv=None):
     study.add_argument("--invariance-weight", type=float, default=1.)
     study.add_argument("--threads", type=int, default=2)
     study.add_argument("--phase", choices=("development", "confirmation"), default="development")
+    study.add_argument("--protocol", choices=("v1", "v2"), default="v2")
     replay = sub.add_parser("replay", help="recompute saved metrics and optionally checkpoint inference")
     replay.add_argument("study", type=Path)
     replay.add_argument("--strict", action="store_true")
@@ -34,7 +35,8 @@ def main(argv=None):
         config = StudyConfig(seeds=tuple(int(s) for s in args.seeds.split(",")), arms=tuple(args.arms.split(",")),
                              steps=args.steps, donor_steps=args.donor_steps, batch_size=args.batch_size,
                              eval_size=args.eval_size, validation_every=args.validation_every, learning_rate=args.learning_rate,
-                             effect_weight=args.effect_weight, invariance_weight=args.invariance_weight, threads=args.threads, phase=args.phase)
+                             effect_weight=args.effect_weight, invariance_weight=args.invariance_weight,
+                             threads=args.threads, phase=args.phase, protocol=args.protocol)
         result = run_study(config, args.output, progress=lambda event: print(json.dumps(event), flush=True))
         print(json.dumps({"output": str(args.output.resolve()), "decision": result["decision"]}, indent=2))
     elif args.command == "replay":

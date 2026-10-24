@@ -1,17 +1,17 @@
-# Model card: Supermix Tether v0.1
+# Model card: Supermix Tether (v0.1 & v0.2)
 
 ## Identity and intended use
 
-Supermix Tether is a CPU-local experimental receiver for frozen handwritten-digit specialists. Its purpose is to compare training objectives for useful specialist dependence under controlled interventions and proxy shifts. It is suitable for inspecting a finite modular-learning experiment and reproducing its saved inference.
+Supermix Tether is a CPU-local experimental receiver for frozen handwritten-digit specialists. Its purpose is to compare training objectives for useful specialist dependence under controlled interventions, proxy shifts, and single-expert (`damage_one`) or majority-expert (`damage_two`) corruption. It is suitable for inspecting a finite modular-learning experiment and reproducing its saved inference.
 
-It is not a general language model or a model released for operational digit recognition. No broad reasoning, semantic-understanding, biological, consciousness or real-world safety capability is claimed. The source documentation makes no empirical performance claim; see [results](docs/results.md) for actual recorded studies when available.
+It is not a general language model or a model released for operational digit recognition. No broad reasoning, semantic-understanding, biological, consciousness or real-world safety capability is claimed. See [results](docs/results.md) for the recorded v0.1 (`outputs/confirmation`) and v0.2 (`outputs/v2-confirmation`) studies.
 
 ## Architecture
 
-The default receiver has **2,762 trainable parameters** and hidden width 24. It consumes three sources × three expert posteriors × ten classes, a source/operation query, and a ten-class proxy context vector. Its learned components are:
+The default receiver has **2,762 trainable parameters** in `v1` (`forensic=False`) and **2,786 trainable parameters** in `v2` (`forensic=True`) at hidden width 24. It consumes three sources × three expert posteriors × ten classes, a source/operation query, and a ten-class proxy context vector. Its learned components are:
 
 - Query embeddings and a softmax source router.
-- Expert reliability weighting from posteriors, entropy, ensemble agreement/deviation and expert identity.
+- Expert reliability weighting: in `v1` (`forensic=False`), from posteriors, entropy, ensemble agreement/deviation and expert identity; in `v2` (`forensic=True`), from posteriors, entropy, top-1/top-2 margin, normalized 9-class runner-up tail entropy (`H(p_-1)/log 9`), runner-up tail standard deviation, and expert identity.
 - Operation-specific transformation matrices and biases.
 - An additive context shortcut MLP.
 

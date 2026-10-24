@@ -62,26 +62,31 @@ def _target(value, name, n, device):
 class TetherReceiver(nn.Module):
     """Small receiver for three sources, three experts and ten digit classes.
 
-    Reliability uses each expert's full posterior, normalized entropy,
-    agreement with the local ensemble, and distance from the local ensemble.
-    Learned expert identities permit systematic differences in specialist
-    quality. The query selects learned operation parameters, never an oracle
-    output transformation. Source routing is learned from query embeddings.
+    In v0.1 (`forensic=False`), reliability uses each expert's full posterior,
+    normalized entropy, agreement with the local ensemble, and distance from the
+    local ensemble. In v0.2 (`forensic=True`), reliability replaces cross-expert
+    majority consensus with intrinsic dark-knowledge features (top-1/top-2 margin,
+    normalized runner-up tail entropy and runner-up tail dispersion) so majority
+    specialist corruption cannot invert reliability weights.
     """
 
-    def __init__(self, hidden=24):
+    def __init__(self, hidden=24, *, forensic=False):
         super().__init__()
         if not isinstance(hidden, int) or isinstance(hidden, bool) or hidden < 4:
             raise ValueError("hidden must be an integer of at least four")
-        self.config = {"hidden": hidden}
+        if not isinstance(forensic, bool):
+            raise TypeError("forensic must be a boolean")
+        self.forensic = forensic
+        self.config = {"hidden": hidden, "forensic": True} if forensic else {"hidden": hidden}
         self.source_embedding = nn.Embedding(3, hidden)
         self.operation_embedding = nn.Embedding(3, hidden)
         self.source_router = nn.Sequential(
             nn.Linear(2 * hidden, hidden), nn.Tanh(), nn.Linear(hidden, 3)
         )
         self.expert_embedding = nn.Embedding(3, 6)
+        reliability_in = 20 if forensic else 19
         self.reliability = nn.Sequential(
-            nn.Linear(19, hidden), nn.Tanh(), nn.Linear(hidden, 1)
+            nn.Linear(reliability_in, hidden), nn.Tanh(), nn.Linear(hidden, 1)
         )
         self.task_matrices = nn.Parameter(torch.randn(3, 10, 10) * 0.08)
         self.task_bias = nn.Parameter(torch.zeros(3, 10))
@@ -99,8 +104,17 @@ class TetherReceiver(nn.Module):
         entropy = -(p * p.clamp_min(1e-8).log()).sum(-1, keepdim=True) / math.log(10)
         agreement = (p * consensus).sum(-1, keepdim=True)
         deviation = (p - consensus).square().sum(-1, keepdim=True)
+        top2 = p.topk(2, dim=-1).values
+        margin = top2[..., :1] - top2[..., 1:2]
+        tail = p.topk(9, dim=-1, largest=False).values
+        tail_norm = tail / tail.sum(-1, keepdim=True).clamp_min(1e-8)
+        tail_entropy = -(tail_norm * tail_norm.clamp_min(1e-8).log()).sum(-1, keepdim=True) / math.log(9)
+        tail_std = tail.std(-1, keepdim=True) * 10.0
         identities = self.expert_embedding.weight[None, None].expand(p.shape[0], 3, -1, -1)
-        features = torch.cat((p, entropy, agreement, deviation, identities), -1)
+        if self.forensic:
+            features = torch.cat((p, entropy, margin, tail_entropy, tail_std, identities), -1)
+        else:
+            features = torch.cat((p, entropy, agreement, deviation, identities), -1)
         expert_weights = self.reliability(features).squeeze(-1).softmax(-1)
         source_posteriors = (expert_weights[..., None] * p).sum(2)
         query_features = torch.cat((self.source_embedding(query[:, 0]),
@@ -119,6 +133,9 @@ class TetherReceiver(nn.Module):
             "pooled_posterior": pooled,
             "expert_entropy": entropy.squeeze(-1),
             "expert_agreement": agreement.squeeze(-1),
+            "expert_margin": margin.squeeze(-1),
+            "tail_entropy": tail_entropy.squeeze(-1),
+            "trust_score": (1.0 - tail_entropy.squeeze(-1)).clamp(0.0, 1.0),
             "task_logits": transformed,
             "shortcut_logits": shortcut,
         }
@@ -148,20 +165,56 @@ def _dropout_view(donors, view):
     return torch.where(drop[..., None], torch.full_like(donors, 0.1), donors)
 
 
-def objective(model, batch, arm, effect_weight=1.0, invariance_weight=1.0):
+def _v2_terms(details, views, batch, probabilities, *, rolled: bool):
+    """Compute paired or row-rolled Co-Variation & Perturbation-Localized Invariance."""
+    n = len(batch["target"])
+    rows = torch.arange(n, device=batch["target"].device)
+    ref_donors = views[0].detach().roll(1, dims=0) if rolled else views[0].detach()
+    ref_target = batch["target"].roll(1, dims=0) if rolled else batch["target"]
+    ref_pooled = details[0]["pooled_posterior"].roll(1, dims=0) if rolled else details[0]["pooled_posterior"]
+
+    changed = (ref_target != batch["relevant_target"]).to(dtype=probabilities[1].dtype)
+    stale_prob = probabilities[1][rows, ref_target].clamp(max=1.0 - 1e-6)
+    repel = (-(1.0 - stale_prob).log() * changed).mean()
+
+    delta_r = (views[1].detach() - ref_donors).abs().mean((-1, -2)).clamp_min(1e-4)
+    source_q = delta_r / delta_r.sum(-1, keepdim=True)
+    kl_source = -(source_q * details[1]["source_weights"].clamp_min(1e-6).log()).sum(-1).mean()
+
+    task_ce = 0.5 * (
+        F.cross_entropy(details[0]["task_logits"], batch["target"])
+        + F.cross_entropy(details[1]["task_logits"], batch["relevant_target"])
+    )
+    effect = 0.5 * (repel + kl_source + task_ce)
+
+    delta_d = (0.5 * (views[3].detach() - ref_donors).abs().sum(-1)).clamp(0.0, 1.0)
+    intact_q = (1.0 - delta_d).clamp_min(1e-4)
+    intact_q = intact_q / intact_q.sum(-1, keepdim=True)
+    kl_expert = -(intact_q * details[3]["expert_weights"].clamp_min(1e-6).log()).sum(-1).mean()
+    pooled_inv = 0.5 * (
+        (details[2]["pooled_posterior"] - ref_pooled).square().sum(-1).mean()
+        + (details[3]["pooled_posterior"] - ref_pooled).square().sum(-1).mean()
+    )
+    invariance = kl_expert + pooled_inv
+    return effect, invariance
+
+
+def objective(model, batch, arm, effect_weight=1.0, invariance_weight=1.0, *, protocol="v1"):
     """Return the differentiable seven-arm objective and scalar diagnostics.
 
     Each arm makes exactly four receiver evaluations. Passive repeats factual
     data; dropout applies four deterministic factual donor masks. Other arms
     share the same factual/relevant/irrelevant/damaged evaluations and labels.
-    The full class-vector effect and invariance penalties propagate gradients
-    through both factual and intervention predictions.
-    Unpaired rolls relevant residuals across rows, retaining their marginal
-    squared-error supervision while breaking factual/counterfactual alignment.
-    For a single-row batch that control coincides with the paired effect.
+    In protocol='v1', effect and invariance operate on final class probability
+    vectors. In protocol='v2' (or when `model.forensic` is True), effect uses
+    paired pre-intervention target repulsion, source co-variation routing and
+    direct task-logit supervision, while invariance uses perturbation-localized
+    specialist weighting and pre-shortcut pooled-posterior stability.
     """
     if arm not in ARMS:
         raise ValueError(f"arm must be one of {ARMS}")
+    if protocol not in ("v1", "v2"):
+        raise ValueError("protocol must be 'v1' or 'v2'")
     for name, value in (("effect_weight", effect_weight), ("invariance_weight", invariance_weight)):
         if not isinstance(value, numbers.Real) or isinstance(value, bool) or not math.isfinite(value) or value < 0:
             raise ValueError(f"{name} must be finite and nonnegative")
@@ -187,30 +240,49 @@ def objective(model, batch, arm, effect_weight=1.0, invariance_weight=1.0):
     labels = [batch["target"]] * 4
     if arm not in ("passive", "dropout"):
         labels[1] = batch["relevant_target"]
-    logits = [model(view.detach(), query, context) for view in views]
+
+    use_v2 = (protocol == "v2" or bool(getattr(model, "forensic", False))) and hasattr(model, "inspect")
+    if use_v2:
+        details = [model.inspect(view.detach(), query, context) for view in views]
+        logits = [d["logits"] for d in details]
+    else:
+        details = None
+        logits = [model(view.detach(), query, context) for view in views]
+
     for prediction in logits:
         if prediction.shape != (n, 10) or not torch.isfinite(prediction).all():
             raise ValueError("receiver must return finite logits with shape [batch,10]")
     ce = torch.stack([F.cross_entropy(prediction, target) for prediction, target in zip(logits, labels)]).mean()
     probabilities = [prediction.softmax(-1) for prediction in logits]
-    ideal_effect = F.one_hot(batch["relevant_target"], 10) - F.one_hot(batch["target"], 10)
-    observed_effect = probabilities[1] - probabilities[0]
-    effect = (observed_effect - ideal_effect).square().sum(-1).mean()
-    residual_relevant = probabilities[1] - F.one_hot(batch["relevant_target"], 10)
-    residual_factual = probabilities[0] - F.one_hot(batch["target"], 10)
-    unpaired_effect = (residual_relevant.roll(1, dims=0) - residual_factual).square().sum(-1).mean()
-    invariance = torch.stack([
-        (probabilities[i] - probabilities[0]).square().sum(-1).mean()
-        for i in (2, 3)
-    ]).mean()
+
+    if use_v2:
+        effect, invariance = _v2_terms(details, views, batch, probabilities, rolled=False)
+        unpaired_effect, unpaired_invariance = _v2_terms(details, views, batch, probabilities, rolled=True)
+    else:
+        ideal_effect = F.one_hot(batch["relevant_target"], 10) - F.one_hot(batch["target"], 10)
+        observed_effect = probabilities[1] - probabilities[0]
+        effect = (observed_effect - ideal_effect).square().sum(-1).mean()
+        residual_relevant = probabilities[1] - F.one_hot(batch["relevant_target"], 10)
+        residual_factual = probabilities[0] - F.one_hot(batch["target"], 10)
+        unpaired_effect = (residual_relevant.roll(1, dims=0) - residual_factual).square().sum(-1).mean()
+        invariance = torch.stack([
+            (probabilities[i] - probabilities[0]).square().sum(-1).mean()
+            for i in (2, 3)
+        ]).mean()
+        unpaired_invariance = invariance
+
     loss = ce
     if arm in ("effect_only", "tether"):
         loss = loss + float(effect_weight) * effect
     if arm == "unpaired":
         loss = loss + float(effect_weight) * unpaired_effect
-    if arm in ("invariance_only", "tether", "unpaired"):
+    if arm in ("invariance_only", "tether"):
         loss = loss + float(invariance_weight) * invariance
+    if arm == "unpaired":
+        loss = loss + float(invariance_weight) * unpaired_invariance
     diagnostics = {"ce": float(ce.detach()), "effect": float(effect.detach()),
                    "unpaired_effect": float(unpaired_effect.detach()),
-                   "invariance": float(invariance.detach()), "loss": float(loss.detach()), "views": 4}
+                   "invariance": float(invariance.detach()),
+                   "unpaired_invariance": float(unpaired_invariance.detach()),
+                   "loss": float(loss.detach()), "views": 4}
     return loss, diagnostics

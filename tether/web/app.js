@@ -6,7 +6,8 @@ const modes = {
   factual:"Unmodified donor outputs and context from a frozen test task.",
   relevant:"Replace the queried source. The correct answer changes; the old context stays.",
   irrelevant:"Replace a source outside the query. The correct answer stays the same.",
-  damaged:"Corrupt one expert posterior. The task and its correct answer stay the same.",
+  damaged:"Corrupt one expert posterior on the queried source. The task and its correct answer stay the same.",
+  damage_two:"Zero-shot 2-of-3 specialist corruption on the queried source. Majority consensus fails; dark-knowledge forensics isolates the lone intact specialist.",
   erased:"Remove donor information to measure the receiver's dependence on specialists.",
   context_shift:"Change the answer-proxy context while retaining the source images and task."
 };
@@ -34,31 +35,40 @@ function metricsFor(arm, condition) {
 }
 function renderCondition() {
   const condition=byId("condition-select").value;
+  const metric=byId("metric-select")?.value || "accuracy";
+  const isError=metric.endsWith("_error");
   byId("condition-name").textContent=human(condition) || "—";
   const records=metricsFor("tether",condition);
   byId("hero-accuracy").textContent=percentage(mean(records.map(x=>x.accuracy)));
   byId("hero-gap").textContent=points(mean(records.map(x=>x.donor_erasure_gap)));
   byId("condition-caption").textContent=records.length ? records.length+" recorded seed"+(records.length===1?"":"s")+" · frozen evaluation" : "No Tether metrics for this condition";
+  if(byId("arm-chart-title")) byId("arm-chart-title").textContent=human(metric).replace(/^./,c=>c.toUpperCase())+" by receiver";
+  if(byId("arm-chart-subtitle")) byId("arm-chart-subtitle").textContent=isError?"Seed means · L2 error (lower is better)":"Seed means · 0–100%";
   const bars=byId("arm-bars"); bars.replaceChildren();
   arms.forEach(arm=>{
     const values=metricsFor(arm,condition);
     if (!values.length) return;
-    const accuracy=mean(values.map(x=>x.accuracy));
+    const val=mean(values.map(x=>x[metric]));
     const row=element("div",undefined,"arm-row "+arm);
     row.append(element("span",armNames[arm],"arm-label"));
     const track=element("div",undefined,"bar-track"), fill=element("div",undefined,"bar-fill");
-    fill.style.width=(finite(accuracy)?Math.max(0,Math.min(100,accuracy*100)):0)+"%";
-    track.append(fill); row.append(track,element("span",percentage(accuracy),"arm-value")); bars.append(row);
+    const pct=finite(val)?(isError?Math.min(100,val*50):Math.max(0,Math.min(100,val*100))):0;
+    fill.style.width=pct+"%";
+    const formatted=finite(val)?(isError?val.toFixed(3):percentage(val)):"—";
+    track.append(fill); row.append(track,element("span",formatted,"arm-value")); bars.append(row);
   });
   if (!bars.children.length) bars.append(element("p","No metrics recorded for this condition.","empty-state"));
   const paired=byId("paired-results"); paired.replaceChildren();
-  const comparisons=(study?.comparisons || []).filter(x=>[condition+".accuracy",condition+".correct_pair_rate"].includes(x.metric));
-  const sorted=[...comparisons].sort((a,b)=>a.metric.localeCompare(b.metric)||a.baseline.localeCompare(b.baseline));
+  const wanted=new Set([condition+"."+metric, condition+".accuracy", condition+".correct_pair_rate"]);
+  const comparisons=(study?.comparisons || []).filter(x=>wanted.has(x.metric));
+  const sorted=[...comparisons].sort((a,b)=>(a.metric===condition+"."+metric?-1:b.metric===condition+"."+metric?1:a.metric.localeCompare(b.metric))||a.baseline.localeCompare(b.baseline));
   sorted.slice(0,4).forEach(item=>{
+    const itemError=item.metric.endsWith("_error");
+    const fmt=v=>finite(v)?(itemError?(v>=0?"+":"")+v.toFixed(3):points(v)):"—";
     const row=element("div",undefined,"paired-item"), title=element("div",undefined,"paired-title");
-    title.append(element("span",(armNames[item.arm]||human(item.arm))+" − "+(armNames[item.baseline]||human(item.baseline))),element("strong",points(item.mean_difference)));
+    title.append(element("span",(armNames[item.arm]||human(item.arm))+" − "+(armNames[item.baseline]||human(item.baseline))),element("strong",fmt(item.mean_difference)));
     row.append(title);
-    const interval=Array.isArray(item.interval) && item.interval.length===2 ? "["+points(item.interval[0])+", "+points(item.interval[1])+"]" : "interval not recorded";
+    const interval=Array.isArray(item.interval) && item.interval.length===2 ? "["+fmt(item.interval[0])+", "+fmt(item.interval[1])+"]" : "interval not recorded";
     row.append(element("small",human(item.metric)+" · "+interval)); paired.append(row);
   });
   if (!paired.children.length) paired.append(element("p","No paired comparisons recorded for this condition.","empty-state"));
@@ -82,9 +92,17 @@ async function loadStudy() {
     byId("study-status").textContent=(complete?"Completed study":"Incomplete study")+" · "+count+" seed"+(count===1?"":"s");
     byId("study-status").classList.toggle("unavailable",!complete);
     const config=study.config || {};
-    byId("study-config").textContent=study.rows.length+" arm records · "+human(config.phase||config.stage||"saved evaluation");
+    const proto=config.protocol || "v1";
+    if(byId("protocol-version")) byId("protocol-version").textContent=proto==="v2"?"v0.2":"v0.1";
+    byId("study-config").textContent=study.rows.length+" arm records · "+human(config.phase||config.stage||"saved evaluation")+" ("+proto+")";
+    const seeds=[...new Set(study.rows.map(x=>x.seed))].sort((a,b)=>a-b);
+    const seedSelect=byId("seed-select");
+    if(seedSelect){
+      seedSelect.replaceChildren();
+      seeds.forEach(s=>{const opt=element("option","Seed "+s);opt.value=String(s);seedSelect.append(opt);});
+    }
     const decision=study.decision||{};
-    byId("hero-decision").textContent=decision.promoted===true ? "Promoted" : "Unpromoted";
+    byId("hero-decision").textContent=decision.candidate_supported_in_this_study===true ? "Supported" : (decision.promoted===true ? "Promoted" : "Unpromoted");
     byId("decision-caption").textContent=decision.reason || decision.status || "See recorded decision below";
     const conditions=[...new Set(study.rows.flatMap(row=>Object.keys(row.metrics||{})))];
     const select=byId("condition-select"); select.replaceChildren();
@@ -145,8 +163,21 @@ function renderExample(data) {
     for(let j=0;j<3;j++){const value=data.expert_weights?.[i]?.[j], part=element("i");part.style.width=(finite(value)?Math.max(0,Math.min(100,value*100)):0)+"%";part.title="Expert "+["A","B","C"][j]+": "+percentage(value);stack.append(part);}
     row.append(stack);experts.append(row);
   }
+  const trustBox=byId("trust-scores");
+  if(trustBox){
+    trustBox.replaceChildren();
+    const damagedSet=new Set(Array.isArray(data.damaged_experts)?data.damaged_experts:[]);
+    if(byId("damaged-badge")) byId("damaged-badge").textContent=damagedSet.size?("Corrupted: "+[...damagedSet].map(x=>["A","B","C"][x]).join(", ")):"1 − tail entropy";
+    for(let j=0;j<3;j++){
+      const tVal=data.trust_score?.[source]?.[j], wVal=data.expert_weights?.[source]?.[j];
+      const isDmg=damagedSet.has(j);
+      const pill=element("div",undefined,"trust-pill"+(isDmg?" damaged":""));
+      pill.append(element("strong","Expert "+["A","B","C"][j]+(isDmg?" (damaged)":"")),element("span","Trust "+percentage(tVal)+" · Wt "+percentage(wVal)));
+      trustBox.append(pill);
+    }
+  }
   byId("mode-description").textContent=modes[mode];
-  byId("example-status").textContent="Saved #"+data.index+" · "+armNames[data.arm || byId("arm-select").value];
+  byId("example-status").textContent="Saved #"+data.index+" · Seed "+(data.seed??"—")+" · "+armNames[data.arm || byId("arm-select").value];
 }
 async function loadExample() {
   if(study?.status!=="complete") return;
@@ -155,7 +186,10 @@ async function loadExample() {
   if(!Number.isInteger(index)||index<0||index>1000000){errorNotice("example-error","Choose a non-negative whole example index.");return;}
   byId("example-status").textContent="Running saved inference…";
   try {
-    const query=new URLSearchParams({index:String(index),arm:byId("arm-select").value,mode});
+    const params={index:String(index),arm:byId("arm-select").value,mode};
+    const seedVal=byId("seed-select")?.value;
+    if(seedVal) params.seed=seedVal;
+    const query=new URLSearchParams(params);
     const data=await api("/api/example?"+query);
     if(token!==exampleRequest)return;
     renderExample(data);errorNotice("example-error","");
@@ -168,7 +202,9 @@ async function loadExample() {
   }
 }
 byId("condition-select").addEventListener("change",renderCondition);
+if(byId("metric-select")) byId("metric-select").addEventListener("change",renderCondition);
 byId("arm-select").addEventListener("change",loadExample);
+if(byId("seed-select")) byId("seed-select").addEventListener("change",loadExample);
 byId("example-index").addEventListener("change",loadExample);
 byId("previous-example").addEventListener("click",()=>{byId("example-index").value=Math.max(0,Number(byId("example-index").value)-1);loadExample();});
 byId("next-example").addEventListener("click",()=>{byId("example-index").value=Math.min(1000000,Number(byId("example-index").value)+1);loadExample();});

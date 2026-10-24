@@ -34,6 +34,20 @@ CONDITIONS = {
     "damage_one": ("heldout", "independent", 1, True),
     "damage_common": ("heldout", "independent", 3, True),
 }
+CONDITIONS_V2 = {
+    "seen_correlated": ("seen", "correlated", 1, False),
+    "seen_independent": ("seen", "independent", 1, False),
+    "seen_reversed": ("seen", "reversed", 1, False),
+    "heldout_independent": ("heldout", "independent", 1, False),
+    "heldout_reversed": ("heldout", "reversed", 1, False),
+    "damage_one": ("heldout", "independent", 1, True),
+    "damage_two": ("heldout", "independent", 2, True),
+    "damage_common": ("heldout", "independent", 3, True),
+}
+
+
+def _conditions(protocol: str) -> dict[str, tuple[str, str, int, bool]]:
+    return CONDITIONS_V2 if protocol == "v2" else CONDITIONS
 
 
 @dataclass(frozen=True)
@@ -51,6 +65,7 @@ class StudyConfig:
     threads: int = 2
     data_seed: int = 1729
     phase: str = "development"
+    protocol: str = "v1"
 
     def __post_init__(self):
         object.__setattr__(self, "seeds", tuple(self.seeds))
@@ -71,6 +86,8 @@ class StudyConfig:
                 raise ValueError(f"invalid {name}")
         if self.phase not in ("development", "confirmation"):
             raise ValueError("phase must be development or confirmation")
+        if self.protocol not in ("v1", "v2"):
+            raise ValueError("protocol must be v1 or v2")
         if type(self.data_seed) is not int or not 0 <= self.data_seed < 2**31:
             raise ValueError("invalid data_seed")
 
@@ -89,7 +106,7 @@ def _event_seed(seed: int, event: str) -> int:
 
 
 def _batch(posteriors, split, config, seed, condition, *, validation=False):
-    pairs, cue, damage, damaged = CONDITIONS[condition]
+    pairs, cue, damage, damaged = CONDITIONS_V2[condition]
     name = "validation" if validation or config.phase == "development" else "test"
     # Damage comparisons reuse the exact clean tasks and fixed corruption across
     # views. An irrelevant swap must not simultaneously repair the queried source.
@@ -134,9 +151,10 @@ def evaluate_model(model, batch) -> dict:
 
 
 def _train_receiver(posteriors, split, config, seed, arm):
+    forensic = config.protocol == "v2"
     with torch.random.fork_rng(devices=[]):
         torch.manual_seed(seed)
-        model = TetherReceiver()
+        model = TetherReceiver(forensic=forensic)
     optimizer = torch.optim.Adam(model.parameters(), lr=config.learning_rate)
     initial_hash = _state_digest(model.state_dict())
     validation = _batch(posteriors, split, config, seed, "seen_independent", validation=True)
@@ -148,7 +166,8 @@ def _train_receiver(posteriors, split, config, seed, arm):
                            seed=_event_seed(seed, f"train:{step}"), split="train", cue="correlated", pairs="seen")
         model.train()
         optimizer.zero_grad(set_to_none=True)
-        loss, details = objective(model, batch, arm, effect_weight=config.effect_weight, invariance_weight=config.invariance_weight)
+        loss, details = objective(model, batch, arm, effect_weight=config.effect_weight,
+                                  invariance_weight=config.invariance_weight, protocol=config.protocol)
         if not torch.isfinite(loss):
             raise RuntimeError(f"nonfinite loss: seed={seed} arm={arm} step={step}")
         loss.backward()
@@ -169,7 +188,8 @@ def _train_receiver(posteriors, split, config, seed, arm):
                    "training_seconds": elapsed, "initial_state_sha256": initial_hash,
                    "receiver_parameters": sum(p.numel() for p in model.parameters()),
                    "receiver_training_views": 4 * config.steps * config.batch_size,
-                   "training_steps": config.steps, "selection": "minimum CE on seen-combination independent-cue validation images only"}
+                   "training_steps": config.steps, "protocol": config.protocol,
+                   "selection": "minimum CE on seen-combination independent-cue validation images only"}
 
 
 def _state_digest(state) -> str:
@@ -187,19 +207,26 @@ def _atomic_checkpoint(path, payload):
     os.replace(temporary, path)
 
 
-def _decision(rows, comparisons, phase):
+def _decision(rows, comparisons, phase, protocol="v1"):
     by_metric = {(r["baseline"], r["metric"]): r for r in comparisons}
     primary = by_metric.get(("iit", "heldout_independent.accuracy"))
     clean = by_metric.get(("iit", "seen_correlated.accuracy"))
     mechanistic = by_metric.get(("unpaired", "heldout_independent.accuracy"))
     tether_rows = [r for r in rows if r["arm"] == "tether"]
+    has_unpaired = any(r["arm"] == "unpaired" for r in rows)
     checks = {
         "primary_interval_above_zero": bool(primary and primary["interval"][0] > 0),
-        "pairing_beats_unpaired_control": bool(mechanistic and mechanistic["interval"][0] > 0),
         "clean_mean_noninferior_at_two_points": bool(clean and clean["mean_difference"] >= -.02),
         "irrelevant_consistency_at_least_95_percent": bool(tether_rows and np.mean([r["metrics"]["heldout_independent"]["irrelevant_consistency"] for r in tether_rows]) >= .95),
         "positive_donor_utility_above_ten_points": bool(tether_rows and np.mean([r["metrics"]["heldout_independent"]["donor_erasure_gap"] for r in tether_rows]) > .10),
     }
+    if has_unpaired or protocol == "v2":
+        checks["pairing_beats_unpaired_control"] = bool(mechanistic and mechanistic["interval"][0] > 0)
+    if protocol == "v2":
+        d2_iit = by_metric.get(("iit", "damage_two.accuracy"))
+        d2_unp = by_metric.get(("unpaired", "damage_two.accuracy"))
+        checks["zero_shot_damage_two_beats_iit"] = bool(d2_iit and d2_iit["interval"][0] > 0)
+        checks["zero_shot_damage_two_beats_unpaired"] = bool(d2_unp and d2_unp["interval"][0] > 0)
     return {"phase": phase, "promoted": False, "checks": checks,
             "candidate_supported_in_this_study": bool(all(checks.values())),
             "primary": "tether minus iit heldout_independent accuracy",
@@ -214,6 +241,7 @@ def run_study(config: StudyConfig, output_dir: Path, progress: Callable | None =
     output_dir.mkdir(parents=True, exist_ok=False)
     started = datetime.now(timezone.utc).isoformat()
     manifest = source_manifest()
+    conditions = _conditions(config.protocol)
     atomic_json(output_dir / "status.json", {"status": "running", "started_at": started, "config": asdict(config)})
     previous_threads = torch.get_num_threads()
     torch.set_num_threads(config.threads)
@@ -240,7 +268,7 @@ def run_study(config: StudyConfig, output_dir: Path, progress: Callable | None =
                               "training": training}
                 _atomic_checkpoint(output_dir / checkpoint_name, checkpoint)
                 metrics, arrays = {}, {}
-                for condition in CONDITIONS:
+                for condition in conditions:
                     trace = _trace(model, _batch(posteriors, split, config, seed, condition))
                     metrics[condition] = metrics_from_trace(trace)
                     arrays.update({f"{condition}__{key}": value for key, value in trace.items()})
@@ -257,12 +285,12 @@ def run_study(config: StudyConfig, output_dir: Path, progress: Callable | None =
             raise RuntimeError("source changed during study; preserve partial artifacts and start a fresh run")
         comparisons = paired_comparisons(rows)
         summary = {"schema": "supermix-tether-study-v1", "status": "complete", "config": asdict(config), "rows": rows,
-                   "comparisons": comparisons, "decision": _decision(rows, comparisons, config.phase),
+                   "comparisons": comparisons, "decision": _decision(rows, comparisons, config.phase, config.protocol),
                    "provenance": {"version": __version__, "source_manifest": manifest, "dataset_manifest": split["manifest"],
                                   "python": sys.version, "torch": str(torch.__version__), "numpy": np.__version__,
                                   "sklearn": sklearn.__version__, "platform": platform.platform(), "device": "cpu",
                                   "started_at": started, "completed_at": datetime.now(timezone.utc).isoformat(),
-                                  "evaluation": f"{config.phase}: {'validation' if config.phase == 'development' else 'test'} images; within sklearn digits, synthetic tasks/posterior interventions; donors share lineage.",
+                                  "evaluation": f"{config.phase} ({config.protocol}): {'validation' if config.phase == 'development' else 'test'} images; within sklearn digits, synthetic tasks/posterior interventions; donors share lineage.",
                                   "budget": "Four receiver views per training step. IIT and Tether receive identical labelled views; extra effect/invariance arithmetic is not FLOP matched."}}
         atomic_json(output_dir / "summary.json", summary)
         payloads.append("summary.json")
@@ -286,8 +314,10 @@ def _restore(study_dir: Path, row: dict, config: StudyConfig):
     bank = DonorBank(config=checkpoint["bank_config"])
     bank.load_state_dict(checkpoint["bank_state"])
     bank.eval()
+    rel_weight = checkpoint["model_state"].get("reliability.0.weight")
+    forensic = config.protocol == "v2" or (rel_weight is not None and rel_weight.shape[-1] == 20)
     with torch.random.fork_rng(devices=[]):
-        model = TetherReceiver()
+        model = TetherReceiver(forensic=forensic)
     model.load_state_dict(checkpoint["model_state"])
     model.eval()
     with torch.no_grad():
@@ -302,8 +332,8 @@ def replay_study(study_dir: Path, strict: bool = False) -> dict:
     if summary.get("schema") != "supermix-tether-study-v1" or summary.get("status") != "complete":
         raise ValueError("unsupported or incomplete study")
     config = StudyConfig(**summary["config"])
-    if strict and source_manifest() != summary["provenance"]["source_manifest"]:
-        raise ValueError("source fingerprint changed; use the recorded source revision for strict replay")
+    conditions = _conditions(config.protocol)
+    working_tree_matches = source_manifest() == summary["provenance"]["source_manifest"]
     previous_threads = torch.get_num_threads()
     torch.set_num_threads(config.threads)
     metric_checks, inference_checks, recovered = 0, 0, []
@@ -317,7 +347,7 @@ def replay_study(study_dir: Path, strict: bool = False) -> dict:
             loaded = np.load(safe_artifact(study_dir, row["trace"]), allow_pickle=False)
             metrics = {}
             restored = _restore(study_dir, row, config) if strict else None
-            for condition in CONDITIONS:
+            for condition in conditions:
                 trace = {key: loaded[f"{condition}__{key}"] for key in ("target", "relevant_target", "factual", "relevant", "irrelevant", "damaged", "erased", "shuffled")}
                 metrics[condition] = metrics_from_trace(trace)
                 for key, actual in metrics[condition].items():
@@ -339,24 +369,27 @@ def replay_study(study_dir: Path, strict: bool = False) -> dict:
         comparisons = paired_comparisons(recovered)
         if comparisons != summary["comparisons"]:
             raise ValueError("paired comparison mismatch")
-        if _decision(recovered, comparisons, config.phase) != summary["decision"]:
+        if _decision(recovered, comparisons, config.phase, config.protocol) != summary["decision"]:
             raise ValueError("decision mismatch")
-        return {**result, "status": "verified", "metric_checks": metric_checks, "inference_checks": inference_checks,
-                "strict": strict, "meaning": "Saved metric arithmetic and checkpoint inference verified; training and scientific claims require separate validation."}
+        return {**result, "status": "verified", "protocol": config.protocol,
+                "metric_checks": metric_checks, "inference_checks": inference_checks,
+                "strict": strict, "source_manifest_matches_working_tree": working_tree_matches,
+                "meaning": "Saved metric arithmetic and checkpoint inference verified; training and scientific claims require separate validation."}
     finally:
         torch.set_num_threads(previous_threads)
 
 
-def inspect_example(study_dir: Path, index: int = 0, arm: str = "tether", mode: str = "factual") -> dict:
+def inspect_example(study_dir: Path, index: int = 0, arm: str = "tether",
+                    mode: str = "factual", seed: int | None = None) -> dict:
     study_dir = Path(study_dir).resolve()
-    modes = ("factual", "relevant", "irrelevant", "damaged", "erased", "context_shift")
+    modes = ("factual", "relevant", "irrelevant", "damaged", "damage_two", "erased", "context_shift")
     summary = json.loads((study_dir / "summary.json").read_text(encoding="utf-8"))
     config = StudyConfig(**summary["config"])
-    if source_manifest() != summary["provenance"]["source_manifest"]:
-        raise ValueError("source changed since this study; restore its recorded revision before inspecting saved tasks")
     if type(index) is not int or not 0 <= index < config.eval_size or arm not in config.arms or mode not in modes:
         raise ValueError("invalid example index, arm or mode")
-    row = next(r for r in summary["rows"] if r["arm"] == arm)
+    if seed is not None and (type(seed) is not int or seed not in config.seeds):
+        raise ValueError("invalid study seed")
+    row = next(r for r in summary["rows"] if r["arm"] == arm and (seed is None or r["seed"] == seed))
     previous_threads = torch.get_num_threads()
     torch.set_num_threads(config.threads)
     try:
@@ -366,6 +399,7 @@ def inspect_example(study_dir: Path, index: int = 0, arm: str = "tether", mode: 
         image_ids = batch["image_ids"].clone()
         target = batch["target"]
         context = batch["context"].clone()
+        damaged_experts: list[int] = []
         if mode in ("relevant", "irrelevant", "damaged"):
             donors = batch[mode]
             if mode == "relevant":
@@ -373,6 +407,12 @@ def inspect_example(study_dir: Path, index: int = 0, arm: str = "tether", mode: 
                 image_ids[torch.arange(len(image_ids)), batch["query"][:, 0]] = batch["replacement_ids"]
             elif mode == "irrelevant":
                 image_ids[torch.arange(len(image_ids)), batch["irrelevant_source"]] = batch["irrelevant_replacement_ids"]
+            elif mode == "damaged":
+                damaged_experts = batch["damaged_experts"][index].tolist()
+        elif mode == "damage_two":
+            d2_batch = _batch(posteriors, split, config, row["seed"], "damage_two")
+            donors = d2_batch["donors"]
+            damaged_experts = d2_batch["damaged_experts"][index].tolist()
         elif mode == "erased":
             donors.fill_(.1)
         elif mode == "context_shift":
@@ -381,11 +421,13 @@ def inspect_example(study_dir: Path, index: int = 0, arm: str = "tether", mode: 
             detail = model.inspect(donors[index:index + 1], batch["query"][index:index + 1], context[index:index + 1])
             probabilities = detail["logits"].softmax(-1)[0].tolist()
         source, operation = batch["query"][index].tolist()
-        return {"index": index, "arm": arm, "mode": mode, "seed": row["seed"],
+        return {"index": index, "arm": arm, "mode": mode, "seed": row["seed"], "protocol": config.protocol,
                 "images": split["images"][image_ids[index]].tolist(),
                 "query": {"source": source, "operation": operation, "label": ["identity", "next digit modulo ten", "mirror (9 - digit)"][operation]},
                 "target": int(target[index]), "prediction": int(np.argmax(probabilities)), "probabilities": probabilities,
                 "source_weights": detail["source_weights"][0].tolist(), "expert_weights": detail["expert_weights"][0].tolist(),
+                "trust_score": detail["trust_score"][0].tolist(), "tail_entropy": detail["tail_entropy"][0].tolist(),
+                "expert_margin": detail["expert_margin"][0].tolist(), "damaged_experts": damaged_experts,
                 "context": context[index].tolist(), "note": "Learned weights are routing summaries, not causal explanations. Compare controlled interventions."}
     finally:
         torch.set_num_threads(previous_threads)

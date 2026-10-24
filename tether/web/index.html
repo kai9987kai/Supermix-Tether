@@ -19,7 +19,7 @@
       <a class="nav-item" href="#protocol"><span>⌘</span> Method & provenance</a>
     </nav>
     <div class="sidebar-note"><span class="status-dot"></span> Runs on this computer<p>Saved study · CPU inference<br>No browser training</p></div>
-    <div class="sidebar-footer">SUPERMIX RESEARCH <span>v0.1</span></div>
+    <div class="sidebar-footer">SUPERMIX RESEARCH <span id="protocol-version">v0.2</span></div>
   </aside>
 
   <div class="workspace">
@@ -51,8 +51,8 @@
         <div class="section-heading"><div><span class="eyebrow">01 / INTERVENTION LAB</span><h2>Look inside a decision</h2><p>Change one input pathway and inspect the saved receiver.</p></div><div class="live-label"><span class="status-dot"></span> Checkpoint inference</div></div>
         <div class="inspector-layout">
           <article class="card inspection-card">
-            <div class="control-row"><label>Receiver<select id="arm-select"><option value="tether">Tether · dual objective</option><option value="iit">IIT · identical-data control</option><option value="unpaired">Unpaired · marginal-loss control</option><option value="passive">Passive</option><option value="dropout">Donor dropout</option><option value="effect_only">Effect only</option><option value="invariance_only">Invariance only</option></select></label><label class="example-label">Saved example<div class="stepper"><button id="previous-example" aria-label="Previous example">−</button><input id="example-index" type="number" min="0" max="1000000" value="0" aria-label="Example index"><button id="next-example" aria-label="Next example">+</button></div></label></div>
-            <div class="mode-tabs" role="group" aria-label="Intervention mode"><button class="selected" data-mode="factual">Factual</button><button data-mode="relevant">Relevant swap</button><button data-mode="irrelevant">Irrelevant swap</button><button data-mode="damaged">Damaged expert</button><button data-mode="erased">Erased donors</button><button data-mode="context_shift">Context shift</button></div>
+            <div class="control-row"><label>Receiver<select id="arm-select"><option value="tether">Tether · dual objective</option><option value="iit">IIT · identical-data control</option><option value="unpaired">Unpaired · marginal-loss control</option><option value="passive">Passive</option><option value="dropout">Donor dropout</option><option value="effect_only">Effect only</option><option value="invariance_only">Invariance only</option></select></label><label>Seed<select id="seed-select"><option value="">Default</option></select></label><label class="example-label">Saved example<div class="stepper"><button id="previous-example" aria-label="Previous example">−</button><input id="example-index" type="number" min="0" max="1000000" value="0" aria-label="Example index"><button id="next-example" aria-label="Next example">+</button></div></label></div>
+            <div class="mode-tabs" role="group" aria-label="Intervention mode"><button class="selected" data-mode="factual">Factual</button><button data-mode="relevant">Relevant swap</button><button data-mode="irrelevant">Irrelevant swap</button><button data-mode="damaged">Damaged (1/3)</button><button data-mode="damage_two">Damaged (2/3)</button><button data-mode="erased">Erased donors</button><button data-mode="context_shift">Context shift</button></div>
             <div class="query-strip"><span class="query-icon">⌕</span><div><span class="small-label">TASK QUERY</span><strong id="task-query">Select a saved study to inspect</strong></div><span id="mode-tag" class="tag">FACTUAL</span></div>
             <div id="source-images" class="source-grid">
               <div class="source-tile"><div class="source-title">Source 1 <span>—</span></div><canvas width="128" height="128" aria-label="Source 1 digit"></canvas><div class="weight-track"><i></i></div><small>Source weight <b>—</b></small></div>
@@ -68,14 +68,15 @@
             <div class="probability-heading"><span>Class probabilities</span><span id="confidence">—</span></div>
             <div id="probabilities" class="probabilities" aria-label="Digit class probabilities"></div>
             <div class="expert-heading"><span>Expert weighting</span><span>A / B / C</span></div><div id="expert-weights" class="expert-weights"></div>
+            <div class="expert-heading"><span>Queried-source dark-knowledge trust</span><span id="damaged-badge">1 − tail entropy</span></div><div id="trust-scores" class="trust-pills"></div>
             <p class="fine-print">Weights describe this computation. Intervention comparisons test whether those pathways affect the answer.</p>
           </article>
         </div>
       </section>
 
       <section id="comparisons">
-        <div class="section-heading"><div><span class="eyebrow">02 / MATCHED COMPARISONS</span><h2>Same data. Different objectives.</h2><p>Seven receiver arms share architecture, initialization and four training views.</p></div><label class="condition-control">Evaluation condition<select id="condition-select" disabled><option>Loading…</option></select></label></div>
-        <div class="comparison-layout"><article class="card arm-card"><div class="card-heading"><h3>Accuracy by receiver</h3><span class="muted">Seed means · 0–100%</span></div><div id="arm-bars" class="arm-bars"><p class="empty-state">Completed study results will appear here.</p></div><div class="chart-note"><span class="swatch"></span> Tether <span class="swatch baseline"></span> Identical-data IIT <span class="muted">Other arms are controls and ablations.</span></div></article>
+        <div class="section-heading"><div><span class="eyebrow">02 / MATCHED COMPARISONS</span><h2>Same data. Different objectives.</h2><p>Seven receiver arms share architecture, initialization and four training views.</p></div><div class="comparison-controls"><label class="condition-control">Evaluation condition<select id="condition-select" disabled><option>Loading…</option></select></label><label class="condition-control">Metric<select id="metric-select"><option value="accuracy">Accuracy</option><option value="correct_pair_rate">Correct pair rate</option><option value="damaged_accuracy">Damaged accuracy</option><option value="donor_erasure_gap">Donor-erasure gap</option><option value="irrelevant_consistency">Irrelevant consistency</option><option value="effect_error">Effect error (L2)</option><option value="invariance_error">Invariance error (L2)</option></select></label></div></div>
+        <div class="comparison-layout"><article class="card arm-card"><div class="card-heading"><h3 id="arm-chart-title">Accuracy by receiver</h3><span id="arm-chart-subtitle" class="muted">Seed means · 0–100%</span></div><div id="arm-bars" class="arm-bars"><p class="empty-state">Completed study results will appear here.</p></div><div class="chart-note"><span class="swatch"></span> Tether <span class="swatch baseline"></span> Identical-data IIT <span class="muted">Other arms are controls and ablations.</span></div></article>
         <article class="card contrast-card"><div class="card-heading"><h3>Paired evidence</h3><span class="tag">DESCRIPTIVE</span></div><p class="muted">Differences use seed-level pairs. Intervals describe this study; they are not safety certificates.</p><div id="paired-results" class="paired-results"><p class="empty-state">No recorded comparisons yet.</p></div></article></div>
       </section>
 

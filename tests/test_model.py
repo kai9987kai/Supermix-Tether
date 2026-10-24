@@ -271,3 +271,61 @@ def test_objective_retains_receiver_gradient_flow():
     grads = [p.grad for p in model.parameters() if p.requires_grad]
     assert grads and all(g is not None and torch.isfinite(g).all() for g in grads)
     assert sum(g.abs().sum().item() for g in grads) > 0
+
+
+def test_forensic_receiver_exposes_dark_knowledge_diagnostics_and_distinguishes_corruption():
+    torch.manual_seed(29)
+    model = model_api().TetherReceiver(forensic=True)
+    assert model.forensic is True
+    batch = literal_batch(2)
+    # Expert 0 has realistic runner-up tail structure; Expert 1 & 2 have flat fabricated tail.
+    intact = torch.tensor([0.92, 0.05, 0.015, 0.005, 0.003, 0.002, 0.002, 0.001, 0.001, 0.001])
+    fabricated = torch.tensor([0.001, 0.991] + [0.001] * 8)
+    batch["donors"][:, 0, 0] = intact
+    batch["donors"][:, 0, 1] = fabricated
+    batch["donors"][:, 0, 2] = fabricated
+    info = model.inspect(batch["donors"], batch["query"], batch["context"])
+    assert info["trust_score"].shape == (2, 3, 3)
+    assert info["tail_entropy"].shape == (2, 3, 3)
+    assert info["expert_margin"].shape == (2, 3, 3)
+    # Intact specialist has non-maximal tail entropy -> positive trust score; fabricated has zero trust score.
+    assert (info["trust_score"][:, 0, 0] > 0.35).all()
+    assert (info["trust_score"][:, 0, 1] < 1e-4).all()
+    assert (info["trust_score"][:, 0, 2] < 1e-4).all()
+
+
+def test_v2_objective_distinguishes_paired_from_unpaired_perturbation_localization():
+    torch.manual_seed(31)
+    batch = literal_batch(2)
+    # Row 0 and Row 1 have distinct donor posteriors and targets so rolling rows breaks alignment.
+    batch["donors"][0, 0] = torch.tensor([0.82, 0.10] + [0.01] * 8)
+    batch["donors"][1, 0] = torch.tensor([0.10, 0.10, 0.73] + [0.01] * 7)
+    batch["target"] = torch.tensor([0, 2], dtype=torch.long)
+    batch["relevant"] = batch["donors"].clone()
+    batch["relevant"][0, 0] = torch.tensor([0.10, 0.82] + [0.01] * 8)
+    batch["relevant"][1, 0] = torch.tensor([0.10, 0.10, 0.10, 0.64] + [0.01] * 6)
+    batch["relevant_target"] = torch.tensor([1, 3], dtype=torch.long)
+    batch["irrelevant"] = batch["donors"].clone()
+    batch["damaged"] = batch["donors"].clone()
+    # Corrupt only expert 2 on source 0.
+    batch["damaged"][0, 0, 2] = torch.tensor([0.001, 0.991] + [0.001] * 8)
+    batch["damaged"][1, 0, 2] = torch.tensor([0.001, 0.001, 0.001, 0.991] + [0.001] * 6)
+
+    torch.manual_seed(31)
+    paired_model = model_api().TetherReceiver(forensic=True)
+    torch.manual_seed(31)
+    unpaired_model = model_api().TetherReceiver(forensic=True)
+
+    paired_loss, paired_info = model_api().objective(paired_model, batch, "tether", protocol="v2")
+    unpaired_loss, unpaired_info = model_api().objective(unpaired_model, batch, "unpaired", protocol="v2")
+    assert paired_info["effect"] != pytest.approx(paired_info["unpaired_effect"], abs=1e-4)
+    assert paired_info["invariance"] != pytest.approx(paired_info["unpaired_invariance"], abs=1e-4)
+    assert float(paired_loss.detach()) == pytest.approx(
+        paired_info["ce"] + paired_info["effect"] + paired_info["invariance"], abs=1e-6
+    )
+    assert float(unpaired_loss.detach()) == pytest.approx(
+        unpaired_info["ce"] + unpaired_info["unpaired_effect"] + unpaired_info["unpaired_invariance"], abs=1e-6
+    )
+    paired_loss.backward()
+    grads = [p.grad for p in paired_model.parameters() if p.requires_grad]
+    assert grads and all(g is not None and torch.isfinite(g).all() for g in grads)

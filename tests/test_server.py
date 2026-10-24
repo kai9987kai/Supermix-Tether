@@ -102,6 +102,7 @@ def test_static_paths_cannot_escape_web_assets(tmp_path, path):
 @pytest.mark.parametrize("query", [
     "index=-1", "index=nan", "index=1.5", "index=1000001",
     "arm=unknown", "mode=train", "index=0&index=1", "unexpected=value",
+    "seed=-1", "seed=abc",
 ])
 def test_invalid_example_queries_are_rejected_before_inference(tmp_path, query):
     study = tmp_path / "study"

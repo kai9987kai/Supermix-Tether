@@ -1,0 +1,36 @@
+{
+  "protocol": "supermix-tether-v0.2-covariation-forensic-study-2026-10-24",
+  "protocol_flag": "v2",
+  "phase": "confirmation",
+  "seeds": [101, 102, 103, 104, 105, 106, 107, 108],
+  "arms": ["passive", "dropout", "iit", "effect_only", "invariance_only", "unpaired", "tether"],
+  "steps": 400,
+  "donor_steps": 180,
+  "batch_size": 128,
+  "eval_size": 512,
+  "validation_every": 50,
+  "learning_rate": 0.02,
+  "effect_weight": 1.0,
+  "invariance_weight": 1.0,
+  "threads": 2,
+  "data_seed": 1729,
+  "primary": "tether minus iit heldout_independent accuracy",
+  "mechanistic_control": "tether minus unpaired heldout_independent accuracy",
+  "zero_shot_corruption_eval": "damage_two (2-of-3 specialist corruption on heldout_independent; trained only on damage_count=1)",
+  "gate": [
+    "primary paired seed bootstrap lower bound > 0",
+    "unpaired comparison lower bound > 0",
+    "clean mean difference >= -0.02",
+    "irrelevant consistency >= 0.95",
+    "donor-erasure accuracy gap > 0.10",
+    "zero-shot damage_two accuracy beats iit (paired bootstrap lower bound > 0)",
+    "zero-shot damage_two accuracy beats unpaired (paired bootstrap lower bound > 0)"
+  ],
+  "architectural_and_objective_changes_from_v0.1": [
+    "Intrinsic dark-knowledge specialist reliability (top1-top2 margin, normalized runner-up tail entropy H(p_-1)/log 9, runner-up tail dispersion) replacing cross-expert majority consensus",
+    "Counterfactual effect co-variation: pre-intervention stale-target repulsion, source co-variation routing and direct task-logit supervision replacing naive L2 residual difference matching",
+    "Perturbation-localized specialist and pooled-posterior invariance replacing output-level probability L2 invariance"
+  ],
+  "prior_study_lineage": "Separately labelled v0.2 follow-up study after v0.1 (outputs/confirmation) reported a negative primary finding (-0.07 pp vs IIT, -0.10 pp vs Unpaired, 1.39% on damage_two). v0.1 artifacts and docs/frozen-protocol.json are preserved unmodified.",
+  "scope": "Descriptive eight-seed same-dataset study; no automatic promotion or independent-dataset claim."
+}

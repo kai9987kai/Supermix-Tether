@@ -166,18 +166,22 @@ def make_batch(posteriors: Tensor, labels: Tensor, indices: Tensor | Sequence[in
     corrupted.scatter_(-1, fabricated[:, :, None], 0.991)
     damaged[row_ids[:, None], sources[:, None], damaged_experts] = corrupted
 
-    replacement_ids = torch.empty(n, dtype=torch.long)
-    irrelevant_replacement_ids = torch.empty(n, dtype=torch.long)
     irrelevant_sources = (sources + torch.randint(1, 3, (n,), generator=random)) % 3
     original_digits = labels[image_ids[row_ids, sources]]
     # Cache eligible pools by digit; all are restricted to the declared split.
-    alternatives = {int(digit): indices[labels[indices] != digit] for digit in labels[indices].unique()}
+    alternatives = {int(digit): indices[labels[indices] != digit].tolist() for digit in labels[indices].unique()}
+    alternative_lengths = {digit: len(pool) for digit, pool in alternatives.items()}
+    original_list = original_digits.tolist()
+    nuisance_list = labels[image_ids[row_ids, irrelevant_sources]].tolist()
+    replacement_list = [0] * n
+    irrelevant_list = [0] * n
     for row in range(n):
-        pool = alternatives[int(original_digits[row])]
-        replacement_ids[row] = pool[torch.randint(len(pool), (), generator=random)]
-        nuisance_digit = int(labels[image_ids[row, irrelevant_sources[row]]])
-        nuisance_pool = alternatives[nuisance_digit]
-        irrelevant_replacement_ids[row] = nuisance_pool[torch.randint(len(nuisance_pool), (), generator=random)]
+        digit = original_list[row]
+        replacement_list[row] = alternatives[digit][int(torch.randint(alternative_lengths[digit], (), generator=random))]
+        nuisance_digit = nuisance_list[row]
+        irrelevant_list[row] = alternatives[nuisance_digit][int(torch.randint(alternative_lengths[nuisance_digit], (), generator=random))]
+    replacement_ids = torch.tensor(replacement_list, dtype=torch.long)
+    irrelevant_replacement_ids = torch.tensor(irrelevant_list, dtype=torch.long)
     relevant = donors.clone()
     relevant[row_ids, sources] = posteriors.detach()[replacement_ids].to(torch.float32)
     irrelevant = donors.clone()

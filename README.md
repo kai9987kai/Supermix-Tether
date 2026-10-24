@@ -1,10 +1,12 @@
 # Supermix Tether
 
-A small CPU-local model for testing whether visual specialists change a receiver's answers in the right way.
+A small CPU-local model for testing whether visual specialists change a receiver's answers in the right way, and whether a receiver can survive zero-shot majority specialist corruption using dark-knowledge forensics and perturbation-localized invariance.
 
-Tether trains a **2,762-parameter receiver** over frozen digit classifiers. It compares ordinary supervised learning, donor dropout, an IIT-style intervention control, and two additional losses: matching relevant intervention effects and suppressing irrelevant or damaged-expert effects. The main comparison is **Tether versus identical-data IIT**, with single-loss ablations and an unpaired-effect control to identify what changes.
+Tether trains a compact receiver (**2,762 parameters** in `v1`, **2,786 parameters** in `v2`) over frozen digit classifiers. It compares ordinary supervised learning (`passive`), donor dropout (`dropout`), an IIT-style intervention control (`iit`), single-loss ablations (`effect_only`, `invariance_only`), a row-shifted mechanistic pairing control (`unpaired`), and the dual-objective `tether` receiver across two separately recorded eight-seed confirmation studies:
+- **v0.1 (`outputs/confirmation`, [`docs/frozen-protocol.json`](docs/frozen-protocol.json)):** Tests output-level probability L2 residual matching and cross-expert majority consensus (`protocol="v1"`). Reports a transparent negative finding for naive L2 residual matching (`-0.07 pp` vs `iit`, `-0.10 pp` vs `unpaired` due to shared-bias cancellation) and shows that cross-expert consensus collapses to `1.39%` under zero-shot 2-of-3 specialist corruption (`damage_two`).
+- **v0.2 (`outputs/v2-confirmation`, [`docs/v2-protocol.json`](docs/v2-protocol.json)):** Replaces cross-expert consensus with **intrinsic dark-knowledge specialist reliability** (runner-up tail entropy $H(p_{-1})/\log 9$ and dispersion) and replaces naive output L2 differences with **counterfactual co-variation & perturbation-localized invariance** (`protocol="v2"`). Across seeds `101..108`, v0.2 `tether` achieves **`97.75%` zero-shot accuracy on 2-of-3 specialist corruption (`damage_two`)** — beating `iit` (`80.76%`) by **`+16.99 pp`** (`95%` CI `[+12.43 pp, +21.44 pp]`, positive on all 8/8 seeds) and `unpaired` (`11.18%`) by **`+86.57 pp`** — while beating `unpaired` on `heldout_independent` by **`+4.15 pp`** (`98.19%` vs `94.04%`) and matching the `98.19%` frozen-donor oracle ceiling.
 
-This is a bounded research prototype. Implementation, replay and measured model quality are separate claims. Study outcomes and the recorded decision belong in [results](docs/results.md); this README asserts no performance advantage or promotion.
+Full tables, mathematical proofs, and interpretation boundaries are recorded in [results](docs/results.md) and [paper](docs/paper.md).
 
 ## Run on this PC
 
@@ -12,17 +14,18 @@ Requires Python 3.12+ and a CPU installation of PyTorch. From this folder:
 
 ```powershell
 python -m pip install -e ".[dev]"
+python -m tether replay outputs/v2-confirmation --strict
 python -m tether replay outputs/confirmation --strict
-python -m tether serve outputs/confirmation --port 8797
+python -m tether serve outputs/v2-confirmation --port 8797
 ```
 
 To train a fresh development study into a new directory:
 
 ```powershell
-python -m tether study --output outputs/dev-run --seeds 11,12 --steps 400
+python -m tether study --protocol v2 --output outputs/dev-run --seeds 11,12 --steps 400
 ```
 
-Open [the local lab](http://127.0.0.1:8797). The viewer displays saved comparisons and runs checkpoint inference on frozen evaluation examples. Switch receiver arms and factual, relevant, irrelevant, damaged, erased or context-shift modes to inspect outputs and learned routes. It does not train from browser inputs.
+Open [the local lab](http://127.0.0.1:8797). The viewer displays saved comparisons (with selectable evaluation conditions and metrics) and runs live checkpoint inference on frozen evaluation examples across seeds (`101..108`) and intervention modes (`factual`, `relevant`, `irrelevant`, `damaged` 1/3, `damage_two` 2/3, `erased`, `context_shift`), exposing both learned routing weights and per-specialist dark-knowledge trust scores. It does not train from browser inputs.
 
 Training uses two CPU threads by default. No GPU, remote checkpoint, API key or network access is needed after dependencies are installed: the image data are bundled with scikit-learn. Runtime depends on the machine and configuration; no training-time estimate is promised here.
 

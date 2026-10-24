@@ -91,3 +91,26 @@ def test_existing_empty_directory_cannot_be_reserved_twice(tmp_path):
     destination.mkdir()
     with pytest.raises(FileExistsError):
         run_study(StudyConfig(steps=1, donor_steps=1), destination)
+
+
+def test_v2_study_runs_evaluates_damage_two_and_replays_strictly(tmp_path):
+    from tether.experiment import StudyConfig, inspect_example, replay_study, run_study
+
+    config = StudyConfig(seeds=(9,), arms=("iit", "unpaired", "tether"), steps=2,
+                         donor_steps=2, batch_size=8, eval_size=12,
+                         validation_every=1, threads=1, protocol="v2")
+    study = tmp_path / "v2-study"
+    result = run_study(config, study)
+    assert result["status"] == "complete"
+    assert result["config"]["protocol"] == "v2"
+    assert all("damage_two" in row["metrics"] for row in result["rows"])
+    assert "zero_shot_damage_two_beats_iit" in result["decision"]["checks"]
+    assert "zero_shot_damage_two_beats_unpaired" in result["decision"]["checks"]
+    receipt = replay_study(study, strict=True)
+    assert receipt["protocol"] == "v2"
+    assert receipt["inference_checks"] == 3 * 8 * 6
+    example = inspect_example(study, 0, "tether", "damage_two", seed=9)
+    assert example["protocol"] == "v2"
+    assert example["seed"] == 9
+    assert len(example["damaged_experts"]) == 2
+    assert len(example["trust_score"]) == 3

@@ -13,7 +13,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 WEB_ROOT = Path(__file__).resolve().parent / "web"
 ARMS = ("passive", "dropout", "iit", "effect_only", "invariance_only", "unpaired", "tether")
 INFERENCE_LOCK = threading.Lock()
-MODES = ("factual", "relevant", "irrelevant", "damaged", "erased", "context_shift")
+MODES = ("factual", "relevant", "irrelevant", "damaged", "damage_two", "erased", "context_shift")
 ASSETS = {"/": "index.html", "/index.html": "index.html",
           "/app.js": "app.js", "/styles.css": "styles.css"}
 CONTENT_TYPES = {".html": "text/html; charset=utf-8",
@@ -90,14 +90,22 @@ def make_server(study_dir: str | Path, host: str = "127.0.0.1",
             if path == "/api/example":
                 try:
                     values = parse_qs(parsed.query, keep_blank_values=True, strict_parsing=True)
-                    if set(values) - {"index", "arm", "mode"} or any(len(v) != 1 for v in values.values()):
-                        raise ValueError("Use one index, arm and mode parameter only.")
+                    if set(values) - {"index", "arm", "mode", "seed"} or any(len(v) != 1 for v in values.values()):
+                        raise ValueError("Use one index, arm, mode and optional seed parameter only.")
                     raw_index = values.get("index", ["0"])[0]
                     if not raw_index.isascii() or not raw_index.isdecimal():
                         raise ValueError("Example index must be a non-negative integer.")
                     index = int(raw_index)
                     if index > 1_000_000:
                         raise ValueError("Example index exceeds the viewer limit.")
+                    seed = None
+                    if "seed" in values:
+                        raw_seed = values["seed"][0]
+                        if not raw_seed.isascii() or not raw_seed.isdecimal():
+                            raise ValueError("Seed must be a non-negative integer.")
+                        seed = int(raw_seed)
+                        if seed >= 2**31:
+                            raise ValueError("Seed exceeds the viewer limit.")
                     arm = values.get("arm", ["tether"])[0]
                     mode = values.get("mode", ["factual"])[0]
                     if arm not in ARMS:
@@ -119,7 +127,7 @@ def make_server(study_dir: str | Path, host: str = "127.0.0.1",
                     # Restoring a checkpoint uses Torch's shared RNG context;
                     # serialize saved-model inspections across browser requests.
                     with INFERENCE_LOCK:
-                        payload = inspect_example(study, index, arm, mode)
+                        payload = inspect_example(study, index, arm, mode, seed=seed)
                     json.dumps(payload, allow_nan=False)
                 except FileNotFoundError as exc:
                     self._json(404, {"status": "missing", "error": str(exc)})
