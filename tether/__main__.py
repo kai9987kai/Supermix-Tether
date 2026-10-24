@@ -29,6 +29,10 @@ def main(argv=None):
     serve = sub.add_parser("serve", help="open a read-only local results service")
     serve.add_argument("study", type=Path)
     serve.add_argument("--port", type=int, default=8797)
+    export = sub.add_parser("export", help="export trained checkpoint to ONNX with numerical verification")
+    export.add_argument("checkpoint", type=Path, help="path to a .pt checkpoint file")
+    export.add_argument("--output", type=Path, default=Path("exports"), help="output directory for ONNX models")
+    export.add_argument("--opset", type=int, default=14, help="ONNX opset version")
     args = parser.parse_args(argv)
     if args.command == "study":
         from .experiment import StudyConfig, run_study
@@ -45,6 +49,10 @@ def main(argv=None):
     elif args.command == "serve":
         from .server import serve
         serve(args.study, host="127.0.0.1", port=args.port)
+    elif args.command == "export":
+        from .export import export_checkpoint
+        manifest = export_checkpoint(args.checkpoint, args.output, opset_version=args.opset)
+        print(json.dumps(manifest, indent=2))
 
 
 if __name__ == "__main__":

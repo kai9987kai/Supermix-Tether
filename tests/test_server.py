@@ -34,10 +34,10 @@ def running_server(study):
         thread.join(timeout=2)
 
 
-def request(port, path, method="GET"):
-    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=4)
+def request(port, path, method="GET", body=None, headers=None, timeout=15):
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
     try:
-        connection.request(method, path)
+        connection.request(method, path, body=body, headers=headers or {})
         response = connection.getresponse()
         return response.status, dict(response.getheaders()), response.read()
     finally:
@@ -143,4 +143,27 @@ def test_post_cannot_modify_study(tmp_path):
 def test_server_refuses_nonloopback_hosts(tmp_path, host):
     with pytest.raises(ValueError, match="loopback"):
         server_module().make_server(tmp_path, host=host, port=0)
+
+
+def test_live_predict_endpoints():
+    study_path = Path("outputs/v2-confirmation")
+    if not (study_path / "summary.json").exists():
+        pytest.skip("outputs/v2-confirmation not present")
+    with running_server(study_path) as port:
+        status, _, body = request(port, "/api/live_predict?digit=7")
+        assert status == 200
+        payload = json.loads(body)
+        assert payload["prediction"] == 7
+        assert "epistemic_trust" in payload
+        assert "abstain" in payload
+        assert payload["abstain"] is False
+
+        # POST with 3/3 corruption -> safe abstention
+        post_data = json.dumps({"digit": 7, "tamper_mode": "corrupt_3"}).encode("utf-8")
+        status, _, body = request(port, "/api/live_predict", method="POST", body=post_data, headers={"Content-Type": "application/json"})
+        assert status == 200
+        post_payload = json.loads(body)
+        assert post_payload["abstain"] is True
+        assert post_payload["selective_prediction"] == -1
+
 

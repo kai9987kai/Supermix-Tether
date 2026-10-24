@@ -70,14 +70,17 @@ class TetherReceiver(nn.Module):
     specialist corruption cannot invert reliability weights.
     """
 
-    def __init__(self, hidden=24, *, forensic=False):
+    def __init__(self, hidden=24, *, forensic=False, epistemic_threshold=0.10):
         super().__init__()
         if not isinstance(hidden, int) or isinstance(hidden, bool) or hidden < 4:
             raise ValueError("hidden must be an integer of at least four")
         if not isinstance(forensic, bool):
             raise TypeError("forensic must be a boolean")
+        if not isinstance(epistemic_threshold, (int, float)) or isinstance(epistemic_threshold, bool) or not math.isfinite(epistemic_threshold) or epistemic_threshold < 0:
+            raise ValueError("epistemic_threshold must be a finite non-negative number")
         self.forensic = forensic
-        self.config = {"hidden": hidden, "forensic": True} if forensic else {"hidden": hidden}
+        self.epistemic_threshold = float(epistemic_threshold)
+        self.config = {"hidden": hidden, "forensic": True, "epistemic_threshold": self.epistemic_threshold} if forensic else {"hidden": hidden}
         self.source_embedding = nn.Embedding(3, hidden)
         self.operation_embedding = nn.Embedding(3, hidden)
         self.source_router = nn.Sequential(
@@ -94,11 +97,11 @@ class TetherReceiver(nn.Module):
             nn.Linear(10, hidden), nn.Tanh(), nn.Linear(hidden, 10)
         )
 
-    def _compute(self, donors, query, context):
+    def _compute(self, donors, query, context, detach_donors: bool = True):
         # The specialist bank is frozen even if a caller supplies a live donor
         # computation graph rather than the normal cached posterior tensors.
         dtype = self.task_matrices.dtype
-        p = donors.detach().to(dtype=dtype)
+        p = donors.detach().to(dtype=dtype) if detach_donors else donors.to(dtype=dtype)
         context = context.to(dtype=dtype)
         consensus = p.mean(2, keepdim=True)
         entropy = -(p * p.clamp_min(1e-8).log()).sum(-1, keepdim=True) / math.log(10)
@@ -125,6 +128,13 @@ class TetherReceiver(nn.Module):
         transformed = transformed + self.task_bias[query[:, 1]]
         shortcut = self.shortcut(context)
         logits = transformed + shortcut
+        trust_scores = (1.0 - tail_entropy.squeeze(-1)).clamp(0.0, 1.0)
+        rows = torch.arange(p.shape[0], device=p.device)
+        queried_sources = query[:, 0]
+        queried_trust = trust_scores[rows, queried_sources].max(dim=-1).values
+        epistemic_abstain = (queried_trust < self.epistemic_threshold) if self.forensic else torch.zeros_like(queried_trust, dtype=torch.bool)
+        predictions = logits.argmax(-1)
+        selective_predictions = torch.where(epistemic_abstain, torch.full_like(predictions, -1), predictions)
         return {
             "logits": logits,
             "source_weights": source_weights,
@@ -135,7 +145,10 @@ class TetherReceiver(nn.Module):
             "expert_agreement": agreement.squeeze(-1),
             "expert_margin": margin.squeeze(-1),
             "tail_entropy": tail_entropy.squeeze(-1),
-            "trust_score": (1.0 - tail_entropy.squeeze(-1)).clamp(0.0, 1.0),
+            "trust_score": trust_scores,
+            "epistemic_trust": queried_trust,
+            "abstain": epistemic_abstain,
+            "selective_prediction": selective_predictions,
             "task_logits": transformed,
             "shortcut_logits": shortcut,
         }
@@ -146,6 +159,35 @@ class TetherReceiver(nn.Module):
         if donors.device != self.task_matrices.device:
             raise ValueError("input tensors and receiver must be on the same device")
         return self._compute(donors, query, context)
+
+    def attribute(self, donors, query, context, target=None):
+        """Compute input-gradient causal attribution of predictions to donor posteriors."""
+        _inputs(donors, query, context)
+        if donors.device != self.task_matrices.device:
+            raise ValueError("input tensors and receiver must be on the same device")
+        dtype = self.task_matrices.dtype
+        p = donors.clone().detach().to(dtype=dtype).requires_grad_(True)
+        detail = self._compute(p, query, context, detach_donors=False)
+        logits = detail["logits"]
+        if target is None:
+            chosen_target = logits.argmax(dim=-1)
+        else:
+            _target(target, "target", donors.shape[0], donors.device)
+            chosen_target = target
+        target_score = logits.gather(1, chosen_target.unsqueeze(-1)).sum()
+        grad_out = torch.autograd.grad(target_score, p, allow_unused=True, create_graph=False)[0]
+        grads = torch.zeros_like(p) if grad_out is None else grad_out
+        saliency = (p.detach() * grads.detach()).abs()
+        source_saliency = saliency.sum(dim=(-1, -2))
+        expert_saliency = saliency.sum(dim=-1)
+        return {
+            "saliency": saliency,
+            "source_saliency": source_saliency,
+            "expert_saliency": expert_saliency,
+            "gradients": grads.detach(),
+            "logits": logits.detach(),
+            "target": chosen_target,
+        }
 
     def forward(self, donors, query, context):
         return self.inspect(donors, query, context)["logits"]

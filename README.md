@@ -7,6 +7,11 @@ A small CPU-local model for testing whether visual specialists change a receiver
 Tether trains a compact receiver (**2,762 parameters** in `v1`, **2,786 parameters** in `v2`) over frozen digit classifiers. It compares ordinary supervised learning (`passive`), donor dropout (`dropout`), an IIT-style intervention control (`iit`), single-loss ablations (`effect_only`, `invariance_only`), a row-shifted mechanistic pairing control (`unpaired`), and the dual-objective `tether` receiver across two separately recorded eight-seed confirmation studies:
 - **v0.1 (`outputs/confirmation`, [`docs/frozen-protocol.json`](docs/frozen-protocol.json)):** Tests output-level probability L2 residual matching and cross-expert majority consensus (`protocol="v1"`). Reports a transparent negative finding for naive L2 residual matching (`-0.07 pp` vs `iit`, `-0.10 pp` vs `unpaired` due to shared-bias cancellation) and shows that cross-expert consensus collapses to `1.39%` under zero-shot 2-of-3 specialist corruption (`damage_two`).
 - **v0.2 (`outputs/v2-confirmation`, [`docs/v2-protocol.json`](docs/v2-protocol.json)):** Replaces cross-expert consensus with **intrinsic dark-knowledge specialist reliability** (runner-up tail entropy $H(p_{-1})/\log 9$ and dispersion) and replaces naive output L2 differences with **counterfactual co-variation & perturbation-localized invariance** (`protocol="v2"`). Across seeds `101..108`, v0.2 `tether` achieves **`97.75%` zero-shot accuracy on 2-of-3 specialist corruption (`damage_two`)** — beating `iit` (`80.76%`) by **`+16.99 pp`** (`95%` CI `[+12.43 pp, +21.44 pp]`, positive on all 8/8 seeds) and `unpaired` (`11.18%`) by **`+86.57 pp`** — while beating `unpaired` on `heldout_independent` by **`+4.15 pp`** (`98.19%` vs `94.04%`) and matching the `98.19%` frozen-donor oracle ceiling.
+- **v0.3 (Epistemic Trust Gating, Causal Attribution & Live Playground):**
+  - **Epistemic Trust Gating & Safe Abstention:** Detects total sensor/specialist spoofing (`damage_common` = 3/3 specialists corrupted) with **AUROC = 1.0000** using tail dark-knowledge entropy $\tau = \max_e (1 - H(p_{s,e,-1})/\log 9)^+$. Setting threshold $\theta = 0.10$ safely abstains (`selective_prediction = -1`) on 100% of catastrophic failures with 0% false rejections on intact and partially damaged inputs.
+  - **Mechanistic Causal Attribution:** Computes exact input $\times$ gradient saliency maps ($\mathcal{A}_{s,e} = \sum_c P_{s,e,c} |\partial \hat{z}/\partial P_{s,e,c}|$) revealing pathway-specific causal tethering.
+  - **Cross-Framework ONNX Export:** Exports both Receiver and DonorBank to ONNX format with strict ONNX Runtime numerical verification within `atol=1e-5`: `python -m tether export <checkpoint> --output <dir>`.
+  - **Interactive Live Playground & Tamper Simulator:** In-browser 8&times;8 drawing canvas, real digit presets, live adversarial tampering simulator, real-time epistemic trust gauge, and causal attribution bars served on `http://127.0.0.1:8797`.
 
 Full checkpoints across all seeds and arms are released on Hugging Face: [**huggingface.co/Kai9987kai/Supermix-Tether**](https://huggingface.co/Kai9987kai/Supermix-Tether).
 Full tables, mathematical proofs, and interpretation boundaries are recorded in [results](docs/results.md) and [paper](docs/paper.md).
@@ -16,9 +21,10 @@ Full tables, mathematical proofs, and interpretation boundaries are recorded in 
 Requires Python 3.12+ and a CPU installation of PyTorch. From this folder:
 
 ```powershell
-python -m pip install -e ".[dev]"
+python -m pip install -e ".[dev,export]"
 python -m tether replay outputs/v2-confirmation --strict
 python -m tether replay outputs/confirmation --strict
+python -m tether export outputs/v2-confirmation/checkpoints/seed-101-tether.pt --output exports/seed-101
 python -m tether serve outputs/v2-confirmation --port 8797
 ```
 

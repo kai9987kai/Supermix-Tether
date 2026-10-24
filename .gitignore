@@ -11,4 +11,6 @@ outputs/*
 !outputs/development/
 *.partial
 _hf_export/
+exports/
+onnx_models/
 .superpowers/

@@ -1,8 +1,8 @@
-# Model card: Supermix Tether (v0.1 & v0.2)
+# Model card: Supermix Tether (v0.1, v0.2 & v0.3)
 
 ## Identity and intended use
 
-Supermix Tether is a CPU-local experimental receiver for frozen handwritten-digit specialists. Its purpose is to compare training objectives for useful specialist dependence under controlled interventions, proxy shifts, and single-expert (`damage_one`) or majority-expert (`damage_two`) corruption. It is suitable for inspecting a finite modular-learning experiment and reproducing its saved inference.
+Supermix Tether is a CPU-local experimental receiver for frozen handwritten-digit specialists. Its purpose is to compare training objectives for useful specialist dependence under controlled interventions, proxy shifts, and single-expert (`damage_one`), majority-expert (`damage_two`), and common-mode (`damage_common`) corruption. In v0.3, it adds calibrated epistemic trust gating, selective safe abstention, mechanistic causal gradient attribution, and cross-framework ONNX export. It is suitable for inspecting a finite modular-learning experiment and reproducing its saved inference.
 
 It is not a general language model or a model released for operational digit recognition. No broad reasoning, semantic-understanding, biological, consciousness or real-world safety capability is claimed. See [results](docs/results.md) for the recorded v0.1 (`outputs/confirmation`) and v0.2 (`outputs/v2-confirmation`) studies.
 
@@ -41,7 +41,7 @@ The phase label `confirmation` is descriptive metadata. Fresh seeds, fixed coeff
 
 Evaluation covers proxy shifts, withheld pairs, relevant/irrelevant swaps, fabricated single-expert/common-mode corruption, donor erasure and selected-source shuffling. Saved metrics distinguish accuracy, correct factual/counterfactual pairs, effect fidelity, nuisance invariance and erasure sensitivity. Seed-level paired bootstrap intervals are descriptive; small seed sets do not establish a general performance advantage.
 
-A large donor-erasure gap can arise from fragility. High irrelevant consistency can occur when both predictions are wrong. Softmax outputs are uncalibrated scores; the model has no conformal coverage, abstention mechanism or uncertainty guarantee. Routing weights describe a computation and are not causal explanations on their own.
+A large donor-erasure gap can arise from fragility. High irrelevant consistency can occur when both predictions are wrong. In v0.1 and v0.2, raw softmax outputs lacked an abstention mechanism; v0.3 introduces calibrated dark-knowledge epistemic trust gating $\tau = \max_e (1 - H(p_{s,e,-1})/\log 9)^+$ with selective abstention ($\theta = 0.10$, AUROC = 1.0000 on total sensor failure). Routing weights describe a computation; exact causal attribution is provided in v0.3 via `model.attribute()` input $\times$ gradient saliency maps.
 
 The task has one operation on one selected source. It does not test multi-step program execution, recurrent memory, unseen operations, writer-disjoint recognition or cross-dataset transfer. Full-bank corruption may remove all usable visual information. Synthetic corruption behavior does not validate robustness to real data or hardware failures.
 

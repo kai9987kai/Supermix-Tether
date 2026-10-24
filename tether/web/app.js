@@ -8,6 +8,7 @@ const modes = {
   irrelevant:"Replace a source outside the query. The correct answer stays the same.",
   damaged:"Corrupt one expert posterior on the queried source. The task and its correct answer stay the same.",
   damage_two:"Zero-shot 2-of-3 specialist corruption on the queried source. Majority consensus fails; dark-knowledge forensics isolates the lone intact specialist.",
+  damage_common:"Total 3-of-3 specialist corruption. Dark-knowledge tail entropy approaches log 9; Epistemic Trust collapses to 0.0, safely triggering calibrated abstention.",
   erased:"Remove donor information to measure the receiver's dependence on specialists.",
   context_shift:"Change the answer-proxy context while retaining the source images and task."
 };
@@ -176,6 +177,31 @@ function renderExample(data) {
       trustBox.append(pill);
     }
   }
+  const isAbstain=Boolean(data.abstain);
+  byId("inspector-abstain-banner")?.classList.toggle("hidden",!isAbstain);
+  if(isAbstain){
+    byId("correctness").textContent="SAFE ABSTAIN";
+    byId("correctness").className="tag wrong";
+  }
+  const trustVal=Number(data.epistemic_trust??0);
+  if(byId("inspector-trust-val")) byId("inspector-trust-val").textContent=percentage(trustVal);
+  if(byId("inspector-meter-fill")) byId("inspector-meter-fill").style.width=Math.max(0,Math.min(100,trustVal*100))+"%";
+  if(byId("inspector-meter-val")) byId("inspector-meter-val").textContent="τ = "+trustVal.toFixed(3);
+  const insSal=byId("inspector-saliency");
+  if(insSal){
+    insSal.replaceChildren();
+    const expSal=data.expert_saliency?.[source]||[0,0,0];
+    const maxSal=Math.max(0.0001,...expSal);
+    ["Expert A","Expert B","Expert C"].forEach((name,j)=>{
+      const sVal=expSal[j]||0;
+      const row=element("div",undefined,"saliency-row");
+      row.append(element("span",name));
+      const track=element("div",undefined,"saliency-track"), fill=element("div",undefined,"saliency-fill");
+      fill.style.width=Math.min(100,(sVal/maxSal)*100)+"%";
+      track.append(fill);row.append(track,element("span",sVal.toFixed(3),"saliency-val"));
+      insSal.append(row);
+    });
+  }
   byId("mode-description").textContent=modes[mode];
   byId("example-status").textContent="Saved #"+data.index+" · Seed "+(data.seed??"—")+" · "+armNames[data.arm || byId("arm-select").value];
 }
@@ -214,6 +240,160 @@ document.querySelectorAll("[data-mode]").forEach(button=>button.addEventListener
   byId("mode-description").textContent=modes[mode];loadExample();
 }));
 document.querySelectorAll(".nav-item").forEach(link=>link.addEventListener("click",()=>{document.querySelectorAll(".nav-item").forEach(item=>item.classList.toggle("active",item===link));}));
-document.querySelectorAll("canvas").forEach(canvas=>drawDigit(canvas,null));
-loadStudy();
+document.querySelectorAll(".source-tile canvas").forEach(canvas=>drawDigit(canvas,null));
+
+let pgPixels=new Float32Array(64), pgDigit=3, pgTamper="clean", pgIsDrawing=false, pgDebounceTimer=null;
+function pgInitCanvas(){
+  const canvas=byId("pg-canvas");if(!canvas)return;
+  const ctx=canvas.getContext("2d");
+  function redraw(){
+    ctx.clearRect(0,0,192,192);ctx.fillStyle="#202633";ctx.fillRect(0,0,192,192);
+    for(let i=0;i<64;i++){
+      const col=i%8, row=Math.floor(i/8), val=pgPixels[i];
+      if(val>0){
+        ctx.fillStyle="rgb("+Math.round(32+val*209)+","+Math.round(38+val*198)+","+Math.round(51+val*185)+")";
+        ctx.fillRect(col*24,row*24,24,24);
+      }
+      ctx.strokeStyle="#283142";ctx.lineWidth=1;ctx.strokeRect(col*24,row*24,24,24);
+    }
+  }
+  function paint(evt){
+    const rect=canvas.getBoundingClientRect();
+    const clientX=evt.touches?evt.touches[0].clientX:evt.clientX;
+    const clientY=evt.touches?evt.touches[0].clientY:evt.clientY;
+    const x=clientX-rect.left, y=clientY-rect.top;
+    const col=Math.floor(x/(rect.width/8)), row=Math.floor(y/(rect.height/8));
+    if(col>=0&&col<8&&row>=0&&row<8){
+      pgPixels[row*8+col]=1.0;redraw();scheduleLivePredict();
+    }
+  }
+  canvas.addEventListener("mousedown",(e)=>{pgIsDrawing=true;paint(e);});
+  window.addEventListener("mouseup",()=>{pgIsDrawing=false;});
+  canvas.addEventListener("mousemove",(e)=>{if(pgIsDrawing)paint(e);});
+  canvas.addEventListener("touchstart",(e)=>{pgIsDrawing=true;paint(e);e.preventDefault();},{passive:false});
+  window.addEventListener("touchend",()=>{pgIsDrawing=false;});
+  canvas.addEventListener("touchmove",(e)=>{if(pgIsDrawing){paint(e);e.preventDefault();}},{passive:false});
+  byId("pg-clear")?.addEventListener("click",()=>{pgPixels.fill(0);redraw();scheduleLivePredict();});
+  byId("pg-invert")?.addEventListener("click",()=>{for(let i=0;i<64;i++)pgPixels[i]=Math.max(0,1.0-pgPixels[i]);redraw();scheduleLivePredict();});
+  document.querySelectorAll(".digit-btn").forEach(btn=>{
+    btn.addEventListener("click",()=>{
+      document.querySelectorAll(".digit-btn").forEach(b=>b.classList.remove("active"));
+      btn.classList.add("active");
+      pgDigit=Number(btn.dataset.digit);
+      loadPresetDigit(pgDigit);
+    });
+  });
+  document.querySelectorAll(".tamper-btn").forEach(btn=>{
+    btn.addEventListener("click",()=>{
+      document.querySelectorAll(".tamper-btn").forEach(b=>b.classList.remove("selected"));
+      btn.classList.add("selected");
+      pgTamper=btn.dataset.tamper;
+      byId("pg-tamper-tag").textContent=pgTamper==="clean"?"CLEAN":pgTamper.toUpperCase().replace("_"," ");
+      scheduleLivePredict();
+    });
+  });
+  byId("pg-confidence")?.addEventListener("input",(e)=>{
+    byId("pg-conf-val").textContent=(Number(e.target.value)*100).toFixed(1)+"%";
+    scheduleLivePredict();
+  });
+  ["pg-arm-select","pg-source-select","pg-op-select","pg-corrupt-class"].forEach(id=>{
+    byId(id)?.addEventListener("change",scheduleLivePredict);
+  });
+  window.pgRedrawCanvas=redraw;
+  loadPresetDigit(pgDigit);
+}
+function scheduleLivePredict(){clearTimeout(pgDebounceTimer);pgDebounceTimer=setTimeout(runLivePredict,80);}
+async function loadPresetDigit(digit){
+  try{
+    const seedVal=byId("seed-select")?.value;
+    const params=new URLSearchParams({
+      digit:String(digit),
+      source:byId("pg-source-select")?.value||"0",
+      operation:byId("pg-op-select")?.value||"0",
+      tamper_mode:pgTamper,
+      arm:byId("pg-arm-select")?.value||"tether"
+    });
+    if(seedVal)params.append("seed",seedVal);
+    const res=await api("/api/live_predict?"+params);
+    const img=res.images?.[res.source];
+    if(Array.isArray(img)&&img.length===64){
+      for(let i=0;i<64;i++)pgPixels[i]=Number(img[i])||0;
+      if(window.pgRedrawCanvas)window.pgRedrawCanvas();
+    }
+    renderLiveOutput(res);
+  }catch(e){errorNotice("pg-error",e.message);}
+}
+async function runLivePredict(){
+  if(!study||study.status!=="complete")return;
+  const body={
+    pixels:Array.from(pgPixels),
+    digit:pgDigit,
+    source:Number(byId("pg-source-select")?.value||0),
+    operation:Number(byId("pg-op-select")?.value||0),
+    tamper_mode:pgTamper,
+    corrupted_class:Number(byId("pg-corrupt-class")?.value||4),
+    confidence:Number(byId("pg-confidence")?.value||0.99),
+    arm:byId("pg-arm-select")?.value||"tether"
+  };
+  const seedVal=byId("seed-select")?.value;
+  if(seedVal)body.seed=Number(seedVal);
+  byId("pg-status").textContent="Running live inference…";
+  try{
+    const response=await fetch("/api/live_predict",{
+      method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify(body),cache:"no-store"
+    });
+    const data=await response.json();
+    if(!response.ok)throw new Error(data.error||"Inference error");
+    renderLiveOutput(data);
+    byId("pg-status").textContent="Ready · "+(armNames[body.arm]||body.arm);
+    errorNotice("pg-error","");
+  }catch(err){
+    byId("pg-status").textContent="Inference error";
+    errorNotice("pg-error",err.message);
+  }
+}
+function renderLiveOutput(data){
+  const isAbstain=Boolean(data.abstain);
+  byId("pg-pred-digit").textContent=isAbstain?"∅":String(data.prediction??"—");
+  byId("pg-raw-digit").textContent=String(data.prediction??"—");
+  byId("pg-decision-badge").textContent=isAbstain?"SAFE ABSTAIN":"TRUSTED";
+  byId("pg-decision-badge").className="tag "+(isAbstain?"wrong":"safe");
+  byId("pg-abstain-banner")?.classList.toggle("hidden",!isAbstain);
+  const trust=Number(data.epistemic_trust??0);
+  byId("pg-trust-percent").textContent=percentage(trust);
+  byId("pg-meter-fill").style.width=Math.max(0,Math.min(100,trust*100))+"%";
+  byId("pg-meter-score").textContent="τ = "+trust.toFixed(3);
+  const probs=Array.isArray(data.probabilities)?data.probabilities:[];
+  byId("pg-top-conf").textContent=finite(probs[data.prediction])?percentage(probs[data.prediction]):"—";
+  const probChart=byId("pg-probabilities");probChart.replaceChildren();
+  for(let i=0;i<10;i++){
+    const val=probs[i], col=element("div",undefined,"prob-column"+(i===data.prediction?" winner":"")), fill=element("i",undefined,"prob-fill");
+    fill.style.height=(finite(val)?Math.max(2,Math.min(75,val*75)):2)+"px";
+    col.title="Digit "+i+": "+percentage(val);col.append(fill,element("span",String(i)));probChart.append(col);
+  }
+  const src=Number(data.source||0);
+  const expSal=data.expert_saliency?.[src]||[0,0,0];
+  const maxSal=Math.max(0.0001,...expSal);
+  const salContainer=byId("pg-saliency-breakdown");salContainer.replaceChildren();
+  ["Expert A","Expert B","Expert C"].forEach((name,j)=>{
+    const sVal=expSal[j]||0, row=element("div",undefined,"saliency-row");
+    row.append(element("span",name));
+    const track=element("div",undefined,"saliency-track"), fill=element("div",undefined,"saliency-fill");
+    fill.style.width=Math.min(100,(sVal/maxSal)*100)+"%";
+    track.append(fill);row.append(track,element("span",sVal.toFixed(3),"saliency-val"));
+    salContainer.append(row);
+  });
+  const damagedSet=new Set(Array.isArray(data.damaged_experts)?data.damaged_experts:[]);
+  byId("pg-damaged-notice").textContent=damagedSet.size?(damagedSet.size+" Corrupted"):"3 Intact";
+  const pills=byId("pg-trust-pills");pills.replaceChildren();
+  for(let j=0;j<3;j++){
+    const tVal=data.trust_score?.[src]?.[j], isDmg=damagedSet.has(j);
+    const pill=element("div",undefined,"trust-pill"+(isDmg?" damaged":""));
+    pill.append(element("strong","Expert "+["A","B","C"][j]+(isDmg?" (corrupted)":"")),element("span","Trust "+percentage(tVal)));
+    pills.append(pill);
+  }
+}
+
+loadStudy().then(()=>pgInitCanvas());
 

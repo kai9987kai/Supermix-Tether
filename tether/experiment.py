@@ -382,7 +382,7 @@ def replay_study(study_dir: Path, strict: bool = False) -> dict:
 def inspect_example(study_dir: Path, index: int = 0, arm: str = "tether",
                     mode: str = "factual", seed: int | None = None) -> dict:
     study_dir = Path(study_dir).resolve()
-    modes = ("factual", "relevant", "irrelevant", "damaged", "damage_two", "erased", "context_shift")
+    modes = ("factual", "relevant", "irrelevant", "damaged", "damage_two", "damage_common", "erased", "context_shift")
     summary = json.loads((study_dir / "summary.json").read_text(encoding="utf-8"))
     config = StudyConfig(**summary["config"])
     if type(index) is not int or not 0 <= index < config.eval_size or arm not in config.arms or mode not in modes:
@@ -413,6 +413,10 @@ def inspect_example(study_dir: Path, index: int = 0, arm: str = "tether",
             d2_batch = _batch(posteriors, split, config, row["seed"], "damage_two")
             donors = d2_batch["donors"]
             damaged_experts = d2_batch["damaged_experts"][index].tolist()
+        elif mode == "damage_common":
+            d3_batch = _batch(posteriors, split, config, row["seed"], "damage_common")
+            donors = d3_batch["donors"]
+            damaged_experts = [0, 1, 2]
         elif mode == "erased":
             donors.fill_(.1)
         elif mode == "context_shift":
@@ -420,6 +424,7 @@ def inspect_example(study_dir: Path, index: int = 0, arm: str = "tether",
         with torch.no_grad():
             detail = model.inspect(donors[index:index + 1], batch["query"][index:index + 1], context[index:index + 1])
             probabilities = detail["logits"].softmax(-1)[0].tolist()
+        attribution = model.attribute(donors[index:index + 1], batch["query"][index:index + 1], context[index:index + 1])
         source, operation = batch["query"][index].tolist()
         return {"index": index, "arm": arm, "mode": mode, "seed": row["seed"], "protocol": config.protocol,
                 "images": split["images"][image_ids[index]].tolist(),
@@ -428,6 +433,94 @@ def inspect_example(study_dir: Path, index: int = 0, arm: str = "tether",
                 "source_weights": detail["source_weights"][0].tolist(), "expert_weights": detail["expert_weights"][0].tolist(),
                 "trust_score": detail["trust_score"][0].tolist(), "tail_entropy": detail["tail_entropy"][0].tolist(),
                 "expert_margin": detail["expert_margin"][0].tolist(), "damaged_experts": damaged_experts,
+                "epistemic_trust": float(detail["epistemic_trust"][0]),
+                "abstain": bool(detail["abstain"][0]),
+                "selective_prediction": int(detail["selective_prediction"][0]),
+                "source_saliency": attribution["source_saliency"][0].tolist(),
+                "expert_saliency": attribution["expert_saliency"][0].tolist(),
                 "context": context[index].tolist(), "note": "Learned weights are routing summaries, not causal explanations. Compare controlled interventions."}
+    finally:
+        torch.set_num_threads(previous_threads)
+
+
+def live_predict(study_dir: Path, pixels: list[float] | None = None,
+                 digit: int = 3, source: int = 0, operation: int = 0,
+                 tamper_mode: str = "none", corrupted_class: int = 4,
+                 confidence: float = 0.991, arm: str = "tether", seed: int | None = None) -> dict:
+    """Run live interactive inference and tamper simulation on real/custom digit inputs."""
+    study_dir = Path(study_dir).resolve()
+    summary = json.loads((study_dir / "summary.json").read_text(encoding="utf-8"))
+    config = StudyConfig(**summary["config"])
+    row = next(r for r in summary["rows"] if r["arm"] == arm and (seed is None or r["seed"] == seed))
+    previous_threads = torch.get_num_threads()
+    torch.set_num_threads(config.threads)
+    try:
+        model, split, _, _ = _restore(study_dir, row, config)
+        # Restore donor bank from row checkpoint
+        ckpt = torch.load(safe_artifact(study_dir, row["checkpoint"]), map_location="cpu", weights_only=True)
+        bank = DonorBank(config=ckpt["bank_config"])
+        bank.load_state_dict(ckpt["bank_state"])
+        bank.eval()
+
+        if pixels is not None and len(pixels) == 64:
+            queried_image = torch.tensor(pixels, dtype=torch.float32).clamp(0.0, 1.0)
+        else:
+            cand = split["test"][split["labels"][split["test"]] == digit]
+            chosen_id = cand[0] if len(cand) > 0 else split["test"][0]
+            queried_image = split["images"][chosen_id]
+
+        bg_images = [split["images"][split["test"][(i + 1) * 10]] for i in range(2)]
+        all_images = [None] * 3
+        all_images[source] = queried_image
+        bg_idx = 0
+        for i in range(3):
+            if all_images[i] is None:
+                all_images[i] = bg_images[bg_idx]
+                bg_idx += 1
+        stacked_images = torch.stack(all_images)
+
+        with torch.no_grad():
+            specialist_logits = bank(stacked_images)
+            posteriors = specialist_logits.softmax(-1).unsqueeze(0)
+
+        damaged_experts = []
+        if tamper_mode in ("corrupt_1", "corrupt_2", "corrupt_3"):
+            count = 1 if tamper_mode == "corrupt_1" else (2 if tamper_mode == "corrupt_2" else 3)
+            damaged_experts = list(range(count))
+            conf = max(0.5, min(0.999, confidence))
+            other_p = (1.0 - conf) / 9.0
+            corrupted_vec = torch.full((10,), other_p, dtype=torch.float32)
+            corrupted_vec[corrupted_class % 10] = conf
+            for e in damaged_experts:
+                posteriors[0, source, e] = corrupted_vec
+
+        query_t = torch.tensor([[source, operation]], dtype=torch.long)
+        context_t = torch.full((1, 10), 0.1, dtype=torch.float32)
+        with torch.no_grad():
+            detail = model.inspect(posteriors, query_t, context_t)
+            probabilities = detail["logits"].softmax(-1)[0].tolist()
+
+        attribution = model.attribute(posteriors, query_t, context_t)
+        operation_names = ["identity", "next digit modulo ten", "mirror (9 - digit)"]
+
+        return {
+            "source": source,
+            "operation": operation,
+            "operation_label": operation_names[operation],
+            "tamper_mode": tamper_mode,
+            "damaged_experts": damaged_experts,
+            "prediction": int(np.argmax(probabilities)),
+            "probabilities": probabilities,
+            "source_weights": detail["source_weights"][0].tolist(),
+            "expert_weights": detail["expert_weights"][0].tolist(),
+            "trust_score": detail["trust_score"][0].tolist(),
+            "tail_entropy": detail["tail_entropy"][0].tolist(),
+            "epistemic_trust": float(detail["epistemic_trust"][0]),
+            "abstain": bool(detail["abstain"][0]),
+            "selective_prediction": int(detail["selective_prediction"][0]),
+            "source_saliency": attribution["source_saliency"][0].tolist(),
+            "expert_saliency": attribution["expert_saliency"][0].tolist(),
+            "images": [img.tolist() for img in all_images],
+        }
     finally:
         torch.set_num_threads(previous_threads)

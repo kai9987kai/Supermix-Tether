@@ -146,7 +146,52 @@ Before the methodological review fixes were applied to v0.1, an initial two-seed
 
 ---
 
-## 5. Interpretation boundaries
+## 6. Supermix Tether v0.3: Epistemic Trust Gating, Selective Abstention, Causal Attribution & ONNX Export
+
+In v0.3, Supermix Tether addresses the final remaining vulnerability of v0.1 and v0.2: common-mode specialist destruction (`damage_common` = 3/3 specialists corrupted, where all honest models dropped to 0.83% blind guessing).
+
+### 6.1 Epistemic Trust Gating & Selective Abstention (AUROC = 1.0000)
+
+Rather than blind guessing when all sensors fail, v0.3 uses the dark-knowledge tail distribution of the specialists to compute an **Epistemic Trust Score**:
+$$\tau = \max_e \left(1 - \frac{H(p_{s,e,-1})}{\log 9}\right)^+$$
+where $H(p_{s,e,-1})$ is the entropy of the normalized 9-class runner-up tail of expert $e$ on queried source $s$.
+
+Empirical distribution across 512 test tasks per condition on sealed v0.2 checkpoints (`outputs/v2-confirmation`, seed 101):
+- `clean (heldout_independent)`: mean max-trust **`0.7220`**, min **`0.2977`**
+- `damage_one (1/3 corrupted)`: mean max-trust **`0.6993`**, min **`0.2470`**
+- `damage_two (2/3 corrupted)`: mean max-trust **`0.6459`**, min **`0.2003`**
+- `damage_common (3/3 corrupted)`: mean max-trust **`0.0000`**, max **`0.0000`**
+
+Because $\min_{\text{clean/partial}} \tau = 0.2003 > 0.0000 = \max_{\text{common}} \tau$, total sensor failure detection achieves **AUROC = 1.0000**.
+Calibrated threshold $\theta = 0.10$ triggers selective abstention (`selective_prediction = -1`, `abstain = True`):
+- Clean & partial damage false rejection rate: **`0.0%`** (100% coverage retained)
+- Total sensor spoofing rejection rate: **`100.0%`** (0% hazardous hallucinations)
+
+### 6.2 Mechanistic Causal Gradient Attribution
+
+`TetherReceiver.attribute(donors, query, context)` computes exact input $\times$ gradient saliency:
+$$\mathcal{A}_{s,e} = \sum_{c=0}^9 P_{s,e,c} \left| \frac{\partial \hat{z}}{\partial P_{s,e,c}} \right|$$
+On real test inputs, saliency on the queried source is over **`3,000×`** higher than unqueried sources (e.g. `3.041` vs `0.0008` and `0.0010`), providing mechanistic verification that the receiver is causally tethered to the queried source.
+
+### 6.3 Cross-Framework ONNX Export & Verification
+
+The CLI command:
+```powershell
+python -m tether export outputs/v2-confirmation/checkpoints/seed-101-tether.pt --output exports/seed-101
+```
+exports both `receiver.onnx` and `donors.onnx` alongside an `onnx_manifest.json`. Every exported artifact is verified using `onnxruntime` against PyTorch outputs within numerical tolerance `atol = 1e-5, rtol = 1e-5`.
+
+### 6.4 Interactive Live Playground & Tamper Simulator
+
+The local laboratory web interface (`http://127.0.0.1:8797`) features an interactive Live Playground:
+- Interactive 8×8 drawing canvas with touch/pointer support and preset digits (0–9).
+- Real-time adversarial tamper injection (corrupt 1, 2, or 3 specialists with target class and peak confidence sliders).
+- Dynamic Epistemic Trust meter with calibrated $\tau = 0.10$ threshold line.
+- Live causal gradient attribution breakdown across all specialists.
+
+---
+
+## 7. Interpretation boundaries
 
 - **1-of-3 (`damage_one`), 2-of-3 (`damage_two`), and 3-of-3 (`damage_common`) corruption:** Under `damage_one` (1 of 3 specialists corrupted), both v0.1 and v0.2 intervention arms reach `~98.1%–98.3%` accuracy. Under `damage_two` (zero-shot 2-of-3 corruption, where corrupted specialists form a 2:1 majority), v0.1 collapses to `1.39%`, v0.2 `iit` reaches `80.76%`, and v0.2 `tether` reaches **`97.75%`** by combining dark-knowledge tail-entropy features with perturbation-localized specialist invariance. Under `damage_common` (all 3 specialists replaced by the same fabricated posterior), all visual information about the true digit is destroyed at the queried source, so accuracy drops to `0.83%` across all honest arms.
 - **Scope:** All results come from the 1,797-image `sklearn.datasets.load_digits` dataset with a fixed 60/20/20 image-identity split (`data_seed = 1729`) and synthetic posterior-level interventions. They do not establish writer-disjoint generalization, natural corruption robustness, or foundation-model behavior.
