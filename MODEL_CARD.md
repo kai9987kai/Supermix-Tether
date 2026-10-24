@@ -49,7 +49,11 @@ The task has one operation on one selected source. It does not test multi-step p
 
 Each saved arm/seed checkpoint contains configuration, donor and receiver state dictionaries, source/data manifests and selection history. Loading uses reconstructed module classes and `torch.load(..., weights_only=True)`. Runtime versions and hashes are recorded, but dependencies and hardware are not hermetically pinned.
 
+Full model weights for both v0.1 and v0.2 across all 8 seeds and all 7 arms are hosted on Hugging Face:
+- **Hugging Face Model Repository:** [https://huggingface.co/Kai9987kai/Supermix-Tether](https://huggingface.co/Kai9987kai/Supermix-Tether)
+
 ```powershell
+python -m tether replay outputs/v2-confirmation --strict
 python -m tether replay outputs/confirmation --strict
 ```
 

@@ -10,4 +10,5 @@ outputs/*
 !outputs/v2-confirmation/
 !outputs/development/
 *.partial
+_hf_export/
 .superpowers/
