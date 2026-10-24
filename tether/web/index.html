@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Supermix Tether · Specialist-use laboratory</title>
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <aside class="sidebar">
+    <a class="brand" href="#overview" aria-label="Supermix Tether overview"><span class="brand-mark">t<span>·</span></span><span>supermix<strong>Tether</strong></span></a>
+    <div class="workspace-label">RESEARCH WORKSPACE <span>01</span></div>
+    <nav aria-label="Study sections">
+      <a class="nav-item active" href="#overview"><span>◈</span> Study overview</a>
+      <a class="nav-item" href="#inspector"><span>⊞</span> Intervention lab</a>
+      <a class="nav-item" href="#comparisons"><span>≋</span> Arm comparisons</a>
+      <a class="nav-item" href="#protocol"><span>⌘</span> Method & provenance</a>
+    </nav>
+    <div class="sidebar-note"><span class="status-dot"></span> Runs on this computer<p>Saved study · CPU inference<br>No browser training</p></div>
+    <div class="sidebar-footer">SUPERMIX RESEARCH <span>v0.1</span></div>
+  </aside>
+
+  <div class="workspace">
+    <header class="topbar"><div><span class="breadcrumb">Laboratories</span><span class="slash">/</span><strong>Specialist use</strong></div><a class="quiet-link" href="/api/results" target="_blank" rel="noopener">Study JSON <span>↗</span></a></header>
+    <main>
+      <section id="overview" class="intro">
+        <div class="eyebrow"><span class="status-dot"></span> CAUSAL-USE EXPERIMENT <span class="version-pill">CPU LOCAL</span></div>
+        <div class="title-row"><div><h1>Do specialists change<br>the answer?</h1><p class="lead">Trace what a receiver uses, what it ignores, and what survives a change in context.</p></div><div class="study-state"><span id="study-status" class="pill">Loading saved study</span><p id="study-config">Reading local evidence…</p></div></div>
+        <div id="study-error" class="notice hidden" role="status"></div>
+        <div class="stat-grid">
+          <article class="stat"><span class="stat-label">Selected condition <span>01</span></span><strong id="condition-name">—</strong><p id="condition-caption">Choose a condition in arm comparisons</p></article>
+          <article class="stat"><span class="stat-label">Tether accuracy <span>02</span></span><strong id="hero-accuracy">—</strong><p>Mean across recorded seeds</p></article>
+          <article class="stat"><span class="stat-label">Donor-erasure gap <span>03</span></span><strong id="hero-gap">—</strong><p>Intact accuracy minus erased accuracy</p></article>
+          <article class="stat"><span class="stat-label">Study decision <span>04</span></span><strong id="hero-decision">Unpromoted</strong><p id="decision-caption">Evidence determines the outcome</p></article>
+        </div>
+      </section>
+
+      <section class="architecture card" aria-label="Model architecture">
+        <div class="section-caption"><span>THE EXPERIMENT, AT A GLANCE</span><span class="muted">Frozen knowledge → learned use</span></div>
+        <div class="architecture-flow">
+          <div class="flow-node"><div class="mini-sources"><i></i><i></i><i></i></div><strong>3 source images</strong><small>8 × 8 handwritten digits</small></div><span class="flow-arrow">→</span>
+          <div class="flow-node"><div class="expert-symbol"><span>A</span><span>B</span><span>C</span></div><strong>Frozen specialists</strong><small>3 heterogeneous classifiers</small></div><span class="flow-arrow">→</span>
+          <div class="flow-node receiver-node"><svg viewBox="0 0 80 30" aria-hidden="true"><path d="M4 5L37 15 4 25M37 15L73 5M37 15L73 25"/><circle cx="37" cy="15" r="5"/></svg><strong>Learned receiver</strong><small>Source routing + expert weighting</small></div><span class="flow-arrow">→</span>
+          <div class="flow-node"><div class="answer-symbol">ŷ</div><strong>Task answer</strong><small>Relevant effect + nuisance invariance</small></div>
+        </div>
+      </section>
+
+      <section id="inspector">
+        <div class="section-heading"><div><span class="eyebrow">01 / INTERVENTION LAB</span><h2>Look inside a decision</h2><p>Change one input pathway and inspect the saved receiver.</p></div><div class="live-label"><span class="status-dot"></span> Checkpoint inference</div></div>
+        <div class="inspector-layout">
+          <article class="card inspection-card">
+            <div class="control-row"><label>Receiver<select id="arm-select"><option value="tether">Tether · dual objective</option><option value="iit">IIT · identical-data control</option><option value="passive">Passive</option><option value="dropout">Donor dropout</option><option value="effect_only">Effect only</option><option value="invariance_only">Invariance only</option></select></label><label class="example-label">Test example<div class="stepper"><button id="previous-example" aria-label="Previous example">−</button><input id="example-index" type="number" min="0" max="1000000" value="0" aria-label="Example index"><button id="next-example" aria-label="Next example">+</button></div></label></div>
+            <div class="mode-tabs" role="group" aria-label="Intervention mode"><button class="selected" data-mode="factual">Factual</button><button data-mode="relevant">Relevant swap</button><button data-mode="irrelevant">Irrelevant swap</button><button data-mode="damaged">Damaged expert</button><button data-mode="erased">Erased donors</button><button data-mode="context_shift">Context shift</button></div>
+            <div class="query-strip"><span class="query-icon">⌕</span><div><span class="small-label">TASK QUERY</span><strong id="task-query">Select a saved study to inspect</strong></div><span id="mode-tag" class="tag">FACTUAL</span></div>
+            <div id="source-images" class="source-grid">
+              <div class="source-tile"><div class="source-title">Source 1 <span>—</span></div><canvas width="128" height="128" aria-label="Source 1 digit"></canvas><div class="weight-track"><i></i></div><small>Source weight <b>—</b></small></div>
+              <div class="source-tile"><div class="source-title">Source 2 <span>—</span></div><canvas width="128" height="128" aria-label="Source 2 digit"></canvas><div class="weight-track"><i></i></div><small>Source weight <b>—</b></small></div>
+              <div class="source-tile"><div class="source-title">Source 3 <span>—</span></div><canvas width="128" height="128" aria-label="Source 3 digit"></canvas><div class="weight-track"><i></i></div><small>Source weight <b>—</b></small></div>
+            </div>
+            <div class="inspection-foot"><p id="mode-description">Unmodified donor outputs and context from a frozen test task.</p><span id="example-status" class="muted">Waiting for saved checkpoint</span></div>
+            <div id="example-error" class="notice hidden" role="status"></div>
+          </article>
+          <article class="card prediction-card">
+            <div class="card-heading"><h3>Receiver output</h3><span id="correctness" class="tag">NOT LOADED</span></div>
+            <div class="answer-row"><div><span class="small-label">PREDICTED DIGIT</span><strong id="prediction">—</strong></div><div class="target-box"><span class="small-label">TASK TARGET</span><strong id="target">—</strong></div></div>
+            <div class="probability-heading"><span>Class probabilities</span><span id="confidence">—</span></div>
+            <div id="probabilities" class="probabilities" aria-label="Digit class probabilities"></div>
+            <div class="expert-heading"><span>Expert weighting</span><span>A / B / C</span></div><div id="expert-weights" class="expert-weights"></div>
+            <p class="fine-print">Weights describe this computation. Intervention comparisons test whether those pathways affect the answer.</p>
+          </article>
+        </div>
+      </section>
+
+      <section id="comparisons">
+        <div class="section-heading"><div><span class="eyebrow">02 / MATCHED COMPARISONS</span><h2>Same data. Different objectives.</h2><p>Six receiver arms share architecture, initialization and four training views.</p></div><label class="condition-control">Evaluation condition<select id="condition-select" disabled><option>Loading…</option></select></label></div>
+        <div class="comparison-layout"><article class="card arm-card"><div class="card-heading"><h3>Accuracy by receiver</h3><span class="muted">Seed means · 0–100%</span></div><div id="arm-bars" class="arm-bars"><p class="empty-state">Completed study results will appear here.</p></div><div class="chart-note"><span class="swatch"></span> Tether <span class="swatch baseline"></span> Identical-data IIT <span class="muted">Other arms are controls and ablations.</span></div></article>
+        <article class="card contrast-card"><div class="card-heading"><h3>Paired evidence</h3><span class="tag">DESCRIPTIVE</span></div><p class="muted">Differences use seed-level pairs. Intervals describe this study; they are not safety certificates.</p><div id="paired-results" class="paired-results"><p class="empty-state">No recorded comparisons yet.</p></div></article></div>
+      </section>
+
+      <section id="protocol" class="protocol-layout">
+        <article class="card"><span class="eyebrow">03 / RESEARCH BOUNDARY</span><h3>Measure useful dependence.</h3><p>Tether combines relevant intervention-effect matching with invariance to irrelevant and damaged-expert changes. The primary comparison is identical-data interchange-intervention training (IIT).</p><div class="protocol-grid"><div><strong>Real images, small domain</strong><p>1,797 sklearn digits. Image identities split before task generation. This is a within-dataset split.</p></div><div><strong>Controlled challenges</strong><p>Withheld source × operation pairs, proxy-cue shifts, donor erasure and synthetic expert corruption.</p></div></div><p class="fine-print">This is a bounded experimental model. Accuracy, routing weights and checksums do not establish semantic understanding, general intelligence or real-world safety.</p></article>
+        <article class="card provenance-card"><span class="eyebrow">04 / SAVED EVIDENCE</span><h3>Provenance & decision</h3><dl id="provenance"><dt>Study</dt><dd>Awaiting saved results</dd></dl><details><summary>Recorded decision</summary><pre id="decision-detail">No decision loaded.</pre></details></article>
+      </section>
+      <footer>SUPERMIX TETHER <span>Small models. Inspectable interventions. Evidence before claims.</span><a href="#overview">Back to top ↑</a></footer>
+    </main>
+  </div>
+</body>
+</html>
+
