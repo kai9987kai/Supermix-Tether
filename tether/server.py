@@ -7,10 +7,12 @@ import ipaddress
 import json
 from pathlib import Path
 import socket
+import threading
 from urllib.parse import parse_qs, unquote, urlsplit
 
 WEB_ROOT = Path(__file__).resolve().parent / "web"
-ARMS = ("passive", "dropout", "iit", "effect_only", "invariance_only", "tether")
+ARMS = ("passive", "dropout", "iit", "effect_only", "invariance_only", "unpaired", "tether")
+INFERENCE_LOCK = threading.Lock()
 MODES = ("factual", "relevant", "irrelevant", "damaged", "erased", "context_shift")
 ASSETS = {"/": "index.html", "/index.html": "index.html",
           "/app.js": "app.js", "/styles.css": "styles.css"}
@@ -114,7 +116,10 @@ def make_server(study_dir: str | Path, host: str = "127.0.0.1",
                     return
                 try:
                     from tether.experiment import inspect_example
-                    payload = inspect_example(study, index, arm, mode)
+                    # Restoring a checkpoint uses Torch's shared RNG context;
+                    # serialize saved-model inspections across browser requests.
+                    with INFERENCE_LOCK:
+                        payload = inspect_example(study, index, arm, mode)
                     json.dumps(payload, allow_nan=False)
                 except FileNotFoundError as exc:
                     self._json(404, {"status": "missing", "error": str(exc)})

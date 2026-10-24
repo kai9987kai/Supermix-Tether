@@ -11,7 +11,7 @@ def main(argv=None):
     study = sub.add_parser("study", help="train a fresh reproducible study; refuses overwrite")
     study.add_argument("--output", type=Path, required=True)
     study.add_argument("--seeds", default="11,12,13")
-    study.add_argument("--arms", default="passive,dropout,iit,effect_only,invariance_only,tether")
+    study.add_argument("--arms", default="passive,dropout,iit,effect_only,invariance_only,unpaired,tether")
     study.add_argument("--steps", type=int, default=400)
     study.add_argument("--donor-steps", type=int, default=180)
     study.add_argument("--batch-size", type=int, default=128)

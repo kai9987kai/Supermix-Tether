@@ -1,0 +1,22 @@
+{
+  "protocol": "supermix-tether-v0.1-fixed-study-2026-10-24",
+  "phase": "confirmation",
+  "seeds": [101,102,103,104,105,106,107,108],
+  "arms": ["passive","dropout","iit","effect_only","invariance_only","unpaired","tether"],
+  "steps": 400,
+  "donor_steps": 180,
+  "batch_size": 128,
+  "eval_size": 512,
+  "validation_every": 50,
+  "learning_rate": 0.02,
+  "effect_weight": 1.0,
+  "invariance_weight": 1.0,
+  "threads": 2,
+  "data_seed": 1729,
+  "primary": "tether minus iit heldout_independent accuracy",
+  "mechanistic_control": "tether minus unpaired heldout_independent accuracy",
+  "gate": ["primary paired seed bootstrap lower bound > 0", "unpaired comparison lower bound > 0", "clean mean difference >= -0.02", "irrelevant consistency >= 0.95", "donor-erasure accuracy gap > 0.10"],
+  "scope": "Descriptive eight-seed same-dataset study; no automatic promotion or independent-dataset claim.",
+  "pipeline_pilot": "Legacy outputs/development at source a7283b3 evaluated test images. No model, data or training hyperparameter was selected from its accuracies. Evaluator fixes and unpaired control were motivated by independent code/method review. Confirmation is fresh training randomness, not a pristine independent benchmark.",
+  "post_result_policy": "Report all arms and all predefined checks, including null or negative findings. Do not retune this protocol after reading results. A new candidate requires a separately labelled study."
+}

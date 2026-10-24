@@ -119,22 +119,25 @@ def paired_comparisons(rows: list[dict], bootstrap_samples: int = 2000) -> list[
         if key in keyed:
             raise ValueError("duplicate paired row")
         keyed[key] = row
-    if not any(arm == "iit" for _, arm in keyed) or not any(arm == "tether" for _, arm in keyed):
+    if not any(arm == "tether" for _, arm in keyed):
         return []
-    seeds = sorted({s for s, a in keyed if a in ("iit", "tether")})
-    if any((s, a) not in keyed for s in seeds for a in ("iit", "tether")):
-        raise ValueError("missing paired seed")
-    first = keyed[(seeds[0], "tether")]["metrics"]
     comparisons = []
-    for condition in sorted(first):
-        for metric in sorted(first[condition]):
-            differences = np.array([keyed[(s, "tether")]["metrics"][condition][metric] - keyed[(s, "iit")]["metrics"][condition][metric] for s in seeds])
-            if not np.isfinite(differences).all():
-                raise ValueError("nonfinite paired metric")
-            rng = np.random.default_rng(9041)
-            means = rng.choice(differences, size=(bootstrap_samples, len(seeds)), replace=True).mean(axis=1)
-            comparisons.append({"metric": f"{condition}.{metric}", "arm": "tether", "baseline": "iit", "seeds": seeds,
-                                "differences": differences.tolist(), "mean_difference": float(differences.mean()),
-                                "interval": np.quantile(means, [.025, .975]).tolist(),
-                                "interpretation": "descriptive paired seed bootstrap; not an anytime-valid or familywise guarantee"})
+    for baseline in ("iit", "unpaired"):
+        if not any(arm == baseline for _, arm in keyed):
+            continue
+        seeds = sorted({s for s, a in keyed if a in (baseline, "tether")})
+        if any((s, a) not in keyed for s in seeds for a in (baseline, "tether")):
+            raise ValueError("missing paired seed")
+        first = keyed[(seeds[0], "tether")]["metrics"]
+        for condition in sorted(first):
+            for metric in sorted(first[condition]):
+                differences = np.array([keyed[(s, "tether")]["metrics"][condition][metric] - keyed[(s, baseline)]["metrics"][condition][metric] for s in seeds])
+                if not np.isfinite(differences).all():
+                    raise ValueError("nonfinite paired metric")
+                rng = np.random.default_rng(9041)
+                means = rng.choice(differences, size=(bootstrap_samples, len(seeds)), replace=True).mean(axis=1)
+                comparisons.append({"metric": f"{condition}.{metric}", "arm": "tether", "baseline": baseline, "seeds": seeds,
+                                    "differences": differences.tolist(), "mean_difference": float(differences.mean()),
+                                    "interval": np.quantile(means, [.025, .975]).tolist(),
+                                    "interpretation": "descriptive paired seed bootstrap; not an anytime-valid or familywise guarantee"})
     return comparisons

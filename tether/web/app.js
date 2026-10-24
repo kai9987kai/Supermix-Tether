@@ -1,7 +1,7 @@
 "use strict";
 const byId = (id) => document.getElementById(id);
-const arms = ["passive", "dropout", "iit", "effect_only", "invariance_only", "tether"];
-const armNames = {passive:"Passive",dropout:"Donor dropout",iit:"IIT",effect_only:"Effect only",invariance_only:"Invariance only",tether:"Tether"};
+const arms = ["passive", "dropout", "iit", "effect_only", "invariance_only", "unpaired", "tether"];
+const armNames = {passive:"Passive",dropout:"Donor dropout",iit:"IIT",effect_only:"Effect only",invariance_only:"Invariance only",unpaired:"Unpaired control",tether:"Tether"};
 const modes = {
   factual:"Unmodified donor outputs and context from a frozen test task.",
   relevant:"Replace the queried source. The correct answer changes; the old context stays.",
@@ -52,8 +52,8 @@ function renderCondition() {
   });
   if (!bars.children.length) bars.append(element("p","No metrics recorded for this condition.","empty-state"));
   const paired=byId("paired-results"); paired.replaceChildren();
-  const comparisons=(study?.comparisons || []).filter(x=>String(x.metric || "").includes(condition));
-  const sorted=[...comparisons].sort((a,b)=>(a.arm==="tether"&&a.baseline==="iit"?-1:0)-(b.arm==="tether"&&b.baseline==="iit"?-1:0));
+  const comparisons=(study?.comparisons || []).filter(x=>[condition+".accuracy",condition+".correct_pair_rate"].includes(x.metric));
+  const sorted=[...comparisons].sort((a,b)=>a.metric.localeCompare(b.metric)||a.baseline.localeCompare(b.baseline));
   sorted.slice(0,4).forEach(item=>{
     const row=element("div",undefined,"paired-item"), title=element("div",undefined,"paired-title");
     title.append(element("span",(armNames[item.arm]||human(item.arm))+" − "+(armNames[item.baseline]||human(item.baseline))),element("strong",points(item.mean_difference)));
@@ -97,7 +97,7 @@ async function loadStudy() {
   } catch(error) {
     byId("study-status").textContent="Saved study unavailable"; byId("study-status").classList.add("unavailable");
     byId("study-config").textContent="The viewer is ready; no completed results were loaded.";
-    errorNotice("study-error",error.message+" Start this viewer with --study pointing to a completed study directory.");
+    errorNotice("study-error",error.message+" Start this viewer with a completed study directory.");
     byId("example-status").textContent="No completed saved study";
   }
 }
@@ -146,7 +146,7 @@ function renderExample(data) {
     row.append(stack);experts.append(row);
   }
   byId("mode-description").textContent=modes[mode];
-  byId("example-status").textContent="Test #"+data.index+" · "+armNames[data.arm || byId("arm-select").value];
+  byId("example-status").textContent="Saved #"+data.index+" · "+armNames[data.arm || byId("arm-select").value];
 }
 async function loadExample() {
   if(study?.status!=="complete") return;

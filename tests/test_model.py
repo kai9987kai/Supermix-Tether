@@ -147,6 +147,7 @@ def test_literal_irrelevant_and_damage_sensitivity_are_both_penalized():
 @pytest.mark.parametrize("arm,extras", [
     ("passive", (0, 0)), ("dropout", (0, 0)), ("iit", (0, 0)),
     ("effect_only", (1, 0)), ("invariance_only", (0, 1)), ("tether", (1, 1)),
+    ("unpaired", (1, 1)),
 ])
 def test_each_arm_has_four_evaluations_and_correct_loss_terms(arm, extras):
     batch = literal_batch()
@@ -155,7 +156,9 @@ def test_each_arm_has_four_evaluations_and_correct_loss_terms(arm, extras):
     loss, info = model_api().objective(model, batch, arm, effect_weight=0.3, invariance_weight=0.7)
     assert len(model.seen) == 4
     assert all(isinstance(v, (int, float)) and math.isfinite(v) for v in info.values())
-    expected = info["ce"] + 0.3 * extras[0] * info["effect"] + 0.7 * extras[1] * info["invariance"]
+    assert "unpaired_effect" in info
+    effect_key = "unpaired_effect" if arm == "unpaired" else "effect"
+    expected = info["ce"] + 0.3 * extras[0] * info[effect_key] + 0.7 * extras[1] * info["invariance"]
     assert float(loss.detach()) == pytest.approx(expected, abs=1e-6)
     if arm == "passive":
         assert all(torch.equal(view, batch["donors"]) for view in model.seen)
@@ -172,6 +175,34 @@ def test_each_arm_has_four_evaluations_and_correct_loss_terms(arm, extras):
             model.seen, ["donors", "relevant", "irrelevant", "damaged"]))
         # Correct labels have probabilities .6, .6, .2 and .6 respectively.
         assert info["ce"] == pytest.approx(-(3 * math.log(0.6) + math.log(0.2)) / 4, abs=1e-6)
+
+
+def test_unpaired_effect_breaks_alignment_but_retains_marginal_supervision():
+    batch = literal_batch(2)
+    batch["donors"][1] = torch.tensor([0.3, 0.5] + [0.025] * 8)
+    batch["relevant"][1] = torch.tensor([0.5, 0.3] + [0.025] * 8)
+    batch["irrelevant"] = batch["relevant"].clone()
+    batch["damaged"] = batch["donors"].clone()
+    paired_model, unpaired_model = FirstPosterior(), FirstPosterior()
+    paired_loss, paired = model_api().objective(paired_model, batch, "tether", 0.3, 0.7)
+    unpaired_loss, unpaired = model_api().objective(unpaired_model, batch, "unpaired", 0.3, 0.7)
+    # Nonidentical residuals in classes 0/1:
+    # factual: (-.4,.2), (-.7,.5); relevant: (.2,-.4), (.5,-.7).
+    # Matched squared residual differences: .72 and 2.88, mean 1.80.
+    # Rolling relevant rows gives (.9,-.9) twice: unpaired mean 1.62.
+    # Other eight residual coordinates are identical and cancel in both.
+    assert paired["effect"] == pytest.approx(1.80, abs=1e-6)
+    assert unpaired["unpaired_effect"] == pytest.approx(1.62, abs=1e-6)
+    assert paired["unpaired_effect"] == pytest.approx(1.62, abs=1e-6)
+    assert unpaired["ce"] == pytest.approx(paired["ce"], abs=1e-7)
+    # Irrelevant squared changes average .20; damaged changes are zero.
+    assert unpaired["invariance"] == pytest.approx(0.10, abs=1e-6)
+    assert float(paired_loss.detach()) == pytest.approx(paired["ce"] + 0.61, abs=1e-6)
+    assert float(unpaired_loss.detach()) == pytest.approx(unpaired["ce"] + 0.556, abs=1e-6)
+    assert len(paired_model.seen) == len(unpaired_model.seen) == 4
+    assert all(torch.equal(first, second) for first, second in zip(paired_model.seen, unpaired_model.seen))
+    unpaired_loss.backward()
+    assert unpaired_model.scale.grad is not None and torch.isfinite(unpaired_model.scale.grad)
 
 
 @pytest.mark.parametrize("change", ["unknown_arm", "negative_weight", "nan_weight", "bad_target", "missing_view", "bad_view"])

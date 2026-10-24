@@ -26,7 +26,10 @@ def test_real_training_checkpoint_and_strict_inference_replay(tmp_path):
     assert result["decision"]["promoted"] is False
     receipt = replay_study(study, strict=True)
     assert receipt["inference_checks"] == 2 * 7 * 6
+    import torch
+    before_inspection = torch.random.get_rng_state().clone()
     example = inspect_example(study, 0, "tether", "factual")
+    assert torch.equal(before_inspection, torch.random.get_rng_state())
     assert len(example["images"]) == 3
     assert all(len(x) == 64 for x in example["images"])
     assert len(example["probabilities"]) == 10
@@ -59,3 +62,32 @@ def test_largest_supported_seed_runs_without_child_rng_overflow(tmp_path):
     result = run_study(StudyConfig(seeds=(2**31 - 1,), arms=("iit",), steps=1,
                                   donor_steps=1, batch_size=4, eval_size=4, threads=1), tmp_path / "large-seed")
     assert result["rows"][0]["seed"] == 2**31 - 1
+
+
+def test_damage_conditions_pair_tasks_and_preserve_the_irrelevant_intervention():
+    import torch
+    from tether.data import load_digits_split
+    from tether.experiment import StudyConfig, _batch
+
+    split = load_digits_split()
+    posteriors = torch.nn.functional.one_hot(split["labels"], 10).float()[:, None].expand(-1, 3, -1).clone()
+    config = StudyConfig(eval_size=24)
+    clean = _batch(posteriors, split, config, 11, "heldout_independent")
+    damaged = _batch(posteriors, split, config, 11, "damage_one")
+    common = _batch(posteriors, split, config, 11, "damage_common")
+    assert torch.equal(clean["image_ids"], damaged["image_ids"])
+    assert torch.equal(clean["query"], common["query"])
+    assert torch.equal(clean["context"], common["context"])
+    rows = torch.arange(24)
+    selected = damaged["query"][:, 0]
+    assert torch.equal(damaged["donors"][rows, selected], damaged["irrelevant"][rows, selected])
+    assert not torch.equal(clean["donors"], damaged["donors"])
+
+
+def test_existing_empty_directory_cannot_be_reserved_twice(tmp_path):
+    from tether.experiment import StudyConfig, run_study
+
+    destination = tmp_path / "reserved"
+    destination.mkdir()
+    with pytest.raises(FileExistsError):
+        run_study(StudyConfig(steps=1, donor_steps=1), destination)

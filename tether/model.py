@@ -17,7 +17,7 @@ from torch import nn
 from torch.nn import functional as F
 
 
-ARMS = ("passive", "dropout", "iit", "effect_only", "invariance_only", "tether")
+ARMS = ("passive", "dropout", "iit", "effect_only", "invariance_only", "tether", "unpaired")
 _VIEW_NAMES = ("donors", "relevant", "irrelevant", "damaged")
 
 
@@ -149,13 +149,16 @@ def _dropout_view(donors, view):
 
 
 def objective(model, batch, arm, effect_weight=1.0, invariance_weight=1.0):
-    """Return the differentiable six-arm objective and scalar diagnostics.
+    """Return the differentiable seven-arm objective and scalar diagnostics.
 
     Each arm makes exactly four receiver evaluations. Passive repeats factual
     data; dropout applies four deterministic factual donor masks. Other arms
     share the same factual/relevant/irrelevant/damaged evaluations and labels.
     The full class-vector effect and invariance penalties propagate gradients
     through both factual and intervention predictions.
+    Unpaired rolls relevant residuals across rows, retaining their marginal
+    squared-error supervision while breaking factual/counterfactual alignment.
+    For a single-row batch that control coincides with the paired effect.
     """
     if arm not in ARMS:
         raise ValueError(f"arm must be one of {ARMS}")
@@ -193,6 +196,9 @@ def objective(model, batch, arm, effect_weight=1.0, invariance_weight=1.0):
     ideal_effect = F.one_hot(batch["relevant_target"], 10) - F.one_hot(batch["target"], 10)
     observed_effect = probabilities[1] - probabilities[0]
     effect = (observed_effect - ideal_effect).square().sum(-1).mean()
+    residual_relevant = probabilities[1] - F.one_hot(batch["relevant_target"], 10)
+    residual_factual = probabilities[0] - F.one_hot(batch["target"], 10)
+    unpaired_effect = (residual_relevant.roll(1, dims=0) - residual_factual).square().sum(-1).mean()
     invariance = torch.stack([
         (probabilities[i] - probabilities[0]).square().sum(-1).mean()
         for i in (2, 3)
@@ -200,8 +206,11 @@ def objective(model, batch, arm, effect_weight=1.0, invariance_weight=1.0):
     loss = ce
     if arm in ("effect_only", "tether"):
         loss = loss + float(effect_weight) * effect
-    if arm in ("invariance_only", "tether"):
+    if arm == "unpaired":
+        loss = loss + float(effect_weight) * unpaired_effect
+    if arm in ("invariance_only", "tether", "unpaired"):
         loss = loss + float(invariance_weight) * invariance
     diagnostics = {"ce": float(ce.detach()), "effect": float(effect.detach()),
+                   "unpaired_effect": float(unpaired_effect.detach()),
                    "invariance": float(invariance.detach()), "loss": float(loss.detach()), "views": 4}
     return loss, diagnostics

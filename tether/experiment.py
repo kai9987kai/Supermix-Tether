@@ -24,7 +24,7 @@ from .model import TetherReceiver, objective
 from .receipts import atomic_json, metrics_from_trace, paired_comparisons, safe_artifact, seal_files, sha256, verify_files
 
 
-ARMS = ("passive", "dropout", "iit", "effect_only", "invariance_only", "tether")
+ARMS = ("passive", "dropout", "iit", "effect_only", "invariance_only", "unpaired", "tether")
 CONDITIONS = {
     "seen_correlated": ("seen", "correlated", 1, False),
     "seen_independent": ("seen", "independent", 1, False),
@@ -90,14 +90,26 @@ def _event_seed(seed: int, event: str) -> int:
 
 def _batch(posteriors, split, config, seed, condition, *, validation=False):
     pairs, cue, damage, damaged = CONDITIONS[condition]
-    name = "validation" if validation else "test"
+    name = "validation" if validation or config.phase == "development" else "test"
+    # Damage comparisons reuse the exact clean tasks and fixed corruption across
+    # views. An irrelevant swap must not simultaneously repair the queried source.
+    task_condition = "heldout_independent" if damaged else condition
     batch = make_batch(posteriors, split["labels"], split[name],
                        n=min(config.eval_size, 256) if validation else config.eval_size,
-                       seed=_event_seed(seed, f"{name}:{condition}"),
+                       seed=_event_seed(seed, f"{name}:{task_condition}"),
                        split=name, cue=cue, pairs=pairs, damage_count=damage)
     if damaged:
         batch = dict(batch)
         batch["donors"] = batch["damaged"].clone()
+        rows = torch.arange(len(batch["donors"]))[:, None]
+        sources = batch["query"][:, 0, None]
+        experts = batch["damaged_experts"]
+        corrupted = batch["damaged"][rows, sources, experts]
+        for key in ("relevant", "irrelevant"):
+            batch[key] = batch[key].clone()
+            batch[key][rows, sources, experts] = corrupted
+        batch["manifest"] = {**batch["manifest"], "paired_damage": True,
+                             "corruption_retained_across_views": True}
     return batch
 
 
@@ -176,12 +188,14 @@ def _atomic_checkpoint(path, payload):
 
 
 def _decision(rows, comparisons, phase):
-    by_metric = {r["metric"]: r for r in comparisons}
-    primary = by_metric.get("heldout_independent.accuracy")
-    clean = by_metric.get("seen_correlated.accuracy")
+    by_metric = {(r["baseline"], r["metric"]): r for r in comparisons}
+    primary = by_metric.get(("iit", "heldout_independent.accuracy"))
+    clean = by_metric.get(("iit", "seen_correlated.accuracy"))
+    mechanistic = by_metric.get(("unpaired", "heldout_independent.accuracy"))
     tether_rows = [r for r in rows if r["arm"] == "tether"]
     checks = {
         "primary_interval_above_zero": bool(primary and primary["interval"][0] > 0),
+        "pairing_beats_unpaired_control": bool(mechanistic and mechanistic["interval"][0] > 0),
         "clean_mean_noninferior_at_two_points": bool(clean and clean["mean_difference"] >= -.02),
         "irrelevant_consistency_at_least_95_percent": bool(tether_rows and np.mean([r["metrics"]["heldout_independent"]["irrelevant_consistency"] for r in tether_rows]) >= .95),
         "positive_donor_utility_above_ten_points": bool(tether_rows and np.mean([r["metrics"]["heldout_independent"]["donor_erasure_gap"] for r in tether_rows]) > .10),
@@ -195,9 +209,9 @@ def _decision(rows, comparisons, phase):
 
 def run_study(config: StudyConfig, output_dir: Path, progress: Callable | None = None) -> dict:
     output_dir = Path(output_dir).resolve()
-    if output_dir.exists() and any(output_dir.iterdir()):
-        raise FileExistsError(f"refusing to overwrite study: {output_dir}")
-    output_dir.mkdir(parents=True, exist_ok=True)
+    # Exclusive directory creation is the reservation; concurrent runs cannot
+    # share checkpoints, temporary writes or partial progress by accident.
+    output_dir.mkdir(parents=True, exist_ok=False)
     started = datetime.now(timezone.utc).isoformat()
     manifest = source_manifest()
     atomic_json(output_dir / "status.json", {"status": "running", "started_at": started, "config": asdict(config)})
@@ -248,7 +262,7 @@ def run_study(config: StudyConfig, output_dir: Path, progress: Callable | None =
                                   "python": sys.version, "torch": str(torch.__version__), "numpy": np.__version__,
                                   "sklearn": sklearn.__version__, "platform": platform.platform(), "device": "cpu",
                                   "started_at": started, "completed_at": datetime.now(timezone.utc).isoformat(),
-                                  "evaluation": "Image-disjoint within sklearn digits; synthetic tasks and posterior interventions. All donors share training lineage.",
+                                  "evaluation": f"{config.phase}: {'validation' if config.phase == 'development' else 'test'} images; within sklearn digits, synthetic tasks/posterior interventions; donors share lineage.",
                                   "budget": "Four receiver views per training step. IIT and Tether receive identical labelled views; extra effect/invariance arithmetic is not FLOP matched."}}
         atomic_json(output_dir / "summary.json", summary)
         payloads.append("summary.json")
@@ -272,7 +286,8 @@ def _restore(study_dir: Path, row: dict, config: StudyConfig):
     bank = DonorBank(config=checkpoint["bank_config"])
     bank.load_state_dict(checkpoint["bank_state"])
     bank.eval()
-    model = TetherReceiver()
+    with torch.random.fork_rng(devices=[]):
+        model = TetherReceiver()
     model.load_state_dict(checkpoint["model_state"])
     model.eval()
     with torch.no_grad():
@@ -337,6 +352,8 @@ def inspect_example(study_dir: Path, index: int = 0, arm: str = "tether", mode: 
     modes = ("factual", "relevant", "irrelevant", "damaged", "erased", "context_shift")
     summary = json.loads((study_dir / "summary.json").read_text(encoding="utf-8"))
     config = StudyConfig(**summary["config"])
+    if source_manifest() != summary["provenance"]["source_manifest"]:
+        raise ValueError("source changed since this study; restore its recorded revision before inspecting saved tasks")
     if type(index) is not int or not 0 <= index < config.eval_size or arm not in config.arms or mode not in modes:
         raise ValueError("invalid example index, arm or mode")
     row = next(r for r in summary["rows"] if r["arm"] == arm)

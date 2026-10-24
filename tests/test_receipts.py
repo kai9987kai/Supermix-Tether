@@ -63,3 +63,12 @@ def test_nonfinite_trace_is_rejected():
 
     with pytest.raises(ValueError):
         metrics_from_trace({"target": np.array([0]), "factual": np.array([[float("nan"), 0.]])})
+
+
+def test_unpaired_control_gets_a_separate_seed_matched_comparison():
+    from tether.receipts import paired_comparisons
+    rows = [{"seed": 1, "arm": arm, "metrics": {"heldout_independent": {"accuracy": accuracy}}}
+            for arm, accuracy in (("iit", .5), ("unpaired", .7), ("tether", .6))]
+    comparisons = paired_comparisons(rows, bootstrap_samples=20)
+    differences = {item["baseline"]: item["mean_difference"] for item in comparisons}
+    assert differences == pytest.approx({"iit": .1, "unpaired": -.1})

@@ -31,42 +31,42 @@
 
 **Files:** tether/data.py, tests/test_data.py. **Consumes/produces:** exact data interfaces in spec.
 
-- [ ] Write tests for literal transforms, split exclusion, counterfactual semantics, deterministic RNG and three trained frozen donors.
-- [ ] Run `python -m pytest tests/test_data.py -q`, observe missing feature failure.
-- [ ] Implement split, donor training and deterministic four-view construction.
-- [ ] Rerun focused tests and inspect complete outcomes.
+- [x] Write tests for literal transforms, split exclusion, counterfactual semantics, deterministic RNG and three trained frozen donors.
+- [x] Run `python -m pytest tests/test_data.py -q`, observe missing feature failure.
+- [x] Implement split, donor training and deterministic four-view construction.
+- [x] Rerun focused tests and inspect complete outcomes.
 
 ### Task 2: Learned receiver and causal-use objective
 
 **Files:** tether/model.py, tests/test_model.py. **Consumes/produces:** exact model interfaces in spec; tests can construct independent literal tensors.
 
-- [ ] Write tests for gradient flow, equal initialization, invalid input and effect/invariance counterexamples.
-- [ ] Observe failure, then implement model/objectives with no oracle in inference.
-- [ ] Verify objective responds to wrong causal effect and nuisance sensitivity; train a bounded simple task to demonstrate learning.
+- [x] Write tests for gradient flow, equal initialization, invalid input and effect/invariance counterexamples.
+- [x] Observe failure, then implement model/objectives with no oracle in inference.
+- [x] Verify objective responds to wrong causal effect and nuisance sensitivity; train a bounded simple task to demonstrate learning.
 
 ### Task 3: Study runner, checkpoints and independent replay
 
 **Files:** tether/experiment.py, tether/receipts.py, tether/__main__.py, tests/test_experiment.py, tests/test_receipts.py.
 
-- [ ] Write failing tests for paired summaries, strict inference restore, tamper rejection and tiny real training study.
-- [ ] Implement fixed config, seed-level arm matching, validation-only checkpoints, frozen test metrics and traces.
-- [ ] Implement atomic non-overwriting run directories, source/data/checkpoint hashes, trace and inference replay.
-- [ ] Run focused and full tests; run development pilot; record a configuration decision before fresh confirmation.
+- [x] Write failing tests for paired summaries, strict inference restore, tamper rejection and tiny real training study.
+- [x] Implement fixed config, seed-level arm matching, validation-only checkpoints, frozen test metrics and traces.
+- [x] Implement atomic non-overwriting run directories, source/data/checkpoint hashes, trace and inference replay.
+- [x] Run focused and full tests; run development pilot; record a configuration decision before fresh confirmation.
 
 ### Task 4: Read-only local inspection UI
 
 **Files:** tether/server.py, tether/web/index.html, tether/web/app.js, tether/web/styles.css, tests/test_server.py.
 
-- [ ] Write failing API tests for missing studies, bounded paths and result loading.
-- [ ] Implement loopback-only server, saved-result comparisons and controlled example inspection.
-- [ ] Verify API, browser initial state, arm/mode switching, errors and no console failures.
+- [x] Write failing API tests for missing studies, bounded paths and result loading.
+- [x] Implement loopback-only server, saved-result comparisons and controlled example inspection.
+- [x] Verify API, browser initial state, arm/mode switching, errors and no console failures.
 
 ### Task 5: Research documentation, experiment and final verification
 
-**Files:** README.md, docs/paper.md, docs/portfolio-review.md, docs/research.md, MODEL_CARD.md, DATA_CARD.md, pyproject.toml, launch.ps1.
+**Files:** README.md, docs/paper.md, docs/portfolio-review.md, docs/research.md, docs/results.md, MODEL_CARD.md, DATA_CARD.md, pyproject.toml, launch.ps1.
 
-- [ ] Integrate all three nine-repository source reviews; preserve hashes, scope and observed licenses.
-- [ ] Document IIT and current 2026 prior art; separate inspirations from implemented mechanisms.
-- [ ] Run fresh multi-seed confirmation after source freeze; save accurate promotion decision and reproducibility limits.
-- [ ] Independently review code and claims, repair substantive findings, run full suite and strict inference replay.
-- [ ] Launch local UI, verify responsive process and provide direct result links.
+- [x] Integrate all three nine-repository source reviews; preserve hashes, scope and observed licenses.
+- [x] Document IIT and current 2026 prior art; separate inspirations from implemented mechanisms.
+- [x] Run fresh multi-seed confirmation after source freeze; save accurate promotion decision and reproducibility limits.
+- [x] Independently review code and claims, repair substantive findings, run full suite and strict inference replay.
+- [x] Launch local UI, verify responsive process and provide direct result links.
