@@ -2,3 +2,4 @@
 *.pt binary
 *.npz binary
 *.png binary
+outputs/** binary

@@ -1,0 +1,32 @@
+{
+  "files": {
+    "checkpoints/seed-11-dropout.pt": "3b1f0f011f29fa00784d4bc210956d2ad666a76f6f34b65160427b2e8d5874ee",
+    "checkpoints/seed-11-effect_only.pt": "dfdd4b12e4e279d2b008342f6cc7acd9179b0a055035b70777c19eee7737ae5c",
+    "checkpoints/seed-11-iit.pt": "ea8d7f1d1aa8f5ec745c03c00292e999faf308f3f02610355f00bff5287a087a",
+    "checkpoints/seed-11-invariance_only.pt": "78229a745acf881ff7016b55d174e6076978060f5530064ceff6059279fcd1f7",
+    "checkpoints/seed-11-passive.pt": "251a3f239c359b4eac5f8fa0a51b457a40ed13ace7bedf7110edf400637a787a",
+    "checkpoints/seed-11-tether.pt": "a55796a43bb4214c191a91dd4b75984b83900de4a243fe04319d80bb771c2b17",
+    "checkpoints/seed-12-dropout.pt": "20c869b1bfd4e0f19498e5b612a5e0c2b97566bdb0622c4a5952d4a7b15a45b8",
+    "checkpoints/seed-12-effect_only.pt": "515f75a1fc9396fa7b64ac6e91aed713034bde39cc5e5f8954c73d3067d562b9",
+    "checkpoints/seed-12-iit.pt": "555ecb0cde91b769a81fe780c46f35d32f632f8ed00e49e78a44a7b2625add01",
+    "checkpoints/seed-12-invariance_only.pt": "f7915efa3ee5d2021f799529176dbfc0ff8d7e61d19375f5b352094ab4b254d0",
+    "checkpoints/seed-12-passive.pt": "db5a3f81d1b445a01838052bf8c0feb5a67087cef5b261880058d8d3077cab81",
+    "checkpoints/seed-12-tether.pt": "c29e627d5c495befc3435936f977e43d3b69d41dac73bca91e8d26143ca4f865",
+    "split.json": "d8cee3f817a97c49abbf1a34b08d39b3bf30e454de692267e1142552bb232c7a",
+    "summary.json": "db8457c6615d302f9daf5461efbce8fcb8bb4c1871ebe2550cba355e0bc31a78",
+    "traces/seed-11-dropout.npz": "7afe12adef8575dd4a07475ebdb13d4ef5f237d8c1cfc8b60ac7242caf111118",
+    "traces/seed-11-effect_only.npz": "cc3366e0b47f4471bfee65884b578487083379a96a445ebae697a561497b5c7d",
+    "traces/seed-11-iit.npz": "bcf01cd2c984ad53c3241cca3cb6465be68fb4700c606f7930e8e6f74fb5591e",
+    "traces/seed-11-invariance_only.npz": "b89155afdd347a88d01d79f5f97af6e30ab518996838222abcb739b8f44343fa",
+    "traces/seed-11-passive.npz": "d87bade91b14874cc1ab32fbb4269f7f8d9fe4218d2965de20fc1a984105aed5",
+    "traces/seed-11-tether.npz": "f6b91d4829a4bc2fd7f59b4489e33130400f84c407729489ae8b74e86e453cf2",
+    "traces/seed-12-dropout.npz": "f64b32a09ad370dbe3bfc51cfc372296eac062994c0172bfe71c4a066095d542",
+    "traces/seed-12-effect_only.npz": "b4da8f969c60e4f18025ba2e80f41409f0af37892d9e7b9c96a8a586e3145762",
+    "traces/seed-12-iit.npz": "26d789061a60b67013c11b2eff5825ef8a37888ea3552a9293068945df061730",
+    "traces/seed-12-invariance_only.npz": "3f97577a747c5d5b1402e27d08ca9cb0041299006b83c13485a427a4cc3f7eb2",
+    "traces/seed-12-passive.npz": "848c8e9114d8ee0cf0b7f6e7a0f628c32972bcdfca4704ddc75db553e3a8f18a",
+    "traces/seed-12-tether.npz": "a1b8254bf2e89e409b82557b21abaf9c903e1befc569450c13e2159ad26f675c"
+  },
+  "meaning": "Byte consistency only; use strict inference replay for model behavior.",
+  "schema": "supermix-tether-integrity-v1"
+}
