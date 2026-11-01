@@ -120,6 +120,11 @@ def make_server(study_dir: str | Path, host: str = "127.0.0.1",
                 defense = raw_def
             else:
                 defense = str(raw_def).strip().lower() in ("1", "true", "yes", "on", "mahalanobis")
+            context_mode = str(data.get("context_mode", "neutral")).strip().lower()
+            if not context_mode:
+                context_mode = "neutral"
+            if context_mode not in ("neutral", "correlated", "adversarial"):
+                raise ValueError("Context mode must be neutral, correlated, or adversarial.")
             pixels = data.get("pixels")
             if pixels is not None:
                 if not isinstance(pixels, list) or len(pixels) != 64:
@@ -139,6 +144,7 @@ def make_server(study_dir: str | Path, host: str = "127.0.0.1",
                 "seed": seed,
                 "alpha": alpha,
                 "defense": defense,
+                "context_mode": context_mode,
             }
 
         def _parse_live_params(self, query: str) -> dict:

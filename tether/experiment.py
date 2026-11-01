@@ -25,14 +25,17 @@ from .conformal import (
     conformal_quantile,
     evaluate_conformal_sets,
     evaluate_nex_conformal_sets,
+    evaluate_weighted_conformal_sets,
     fit_mahalanobis_forensics,
     fit_temperature,
+    helmholtz_free_energy_forensics,
     nex_raps_prediction_sets,
     raps_nonconformity_scores,
     raps_prediction_sets,
     sanitize_specialist_posteriors,
     score_mahalanobis_forensics,
     softmax_temperature,
+    weighted_conformal_prediction_sets,
 )
 from .data import DonorBank, fit_donors, load_digits_split, make_batch
 from .model import TetherReceiver, objective
@@ -458,6 +461,7 @@ def _calibrate_cached(study_dir: Path, row: dict, config: StudyConfig,
     entry = {
         "temperature": t_star,
         "val_scores": val_scores,
+        "val_conflict": val_conflict,
         "val_conflict_q95": val_conflict_q95,
         "pre_scaling": temp_fit["pre_scaling"],
         "post_scaling": temp_fit["post_scaling"],
@@ -465,6 +469,20 @@ def _calibrate_cached(study_dir: Path, row: dict, config: StudyConfig,
     if len(_CALIBRATION_CACHE) < 256:
         _CALIBRATION_CACHE[key] = entry
     return entry
+
+
+def _make_context_tensor(context_mode: str, expected_target: int, corrupted_class: int, operation: int) -> torch.Tensor:
+    """Construct neutral (0.1), correlated (target one-hot), or adversarial (decoy one-hot) context vector."""
+    mode = str(context_mode or "neutral").lower()
+    if mode == "correlated":
+        return F.one_hot(torch.tensor([int(expected_target) % 10], dtype=torch.long), 10).to(dtype=torch.float32)
+    if mode == "adversarial":
+        c_cls = int(corrupted_class) % 10
+        adv_target = [c_cls, (c_cls + 1) % 10, 9 - c_cls][int(operation) % 3]
+        if adv_target == int(expected_target) % 10:
+            adv_target = (int(expected_target) + 1) % 10
+        return F.one_hot(torch.tensor([adv_target], dtype=torch.long), 10).to(dtype=torch.float32)
+    return torch.full((1, 10), 0.1, dtype=torch.float32)
 
 
 def inspect_example(study_dir: Path, index: int = 0, arm: str = "tether",
@@ -530,6 +548,14 @@ def inspect_example(study_dir: Path, index: int = 0, arm: str = "tether",
                 target=target[index:index + 1],
             )
             shapley = model.shapley_interactions(d_slice, q_slice, c_slice)
+            pid = model.pid_decomposition(d_slice, q_slice, c_slice, target=target[index:index + 1])
+            mediation = model.causal_mediation(d_slice, q_slice, c_slice, target=target[index:index + 1])
+            crit = model.critical_corruption_threshold(
+                clean_donors, q_slice, c_slice,
+                corrupted_experts=damaged_experts if damaged_experts else (0, 1),
+                corrupted_class=int((target[index].item() + 1) % 10),
+                target=target[index:index + 1],
+            )
         attribution = model.attribute(d_slice, q_slice, c_slice)
         ig = model.integrated_gradients(d_slice, q_slice, c_slice, steps=128)
         cal_probs = softmax_temperature(logits_np, temperature=cal["temperature"])
@@ -547,8 +573,21 @@ def inspect_example(study_dir: Path, index: int = 0, arm: str = "tether",
             epistemic_trust=np.array([ep_trust]) if model.forensic else None,
             epistemic_threshold=model.epistemic_threshold,
         )
+        wcp = weighted_conformal_prediction_sets(
+            cal_scores=cal["val_scores"],
+            cal_shift_scores=cal["val_conflict"],
+            test_logits=logits_np,
+            test_shift_scores=np.array([conflict_val]),
+            temperature=cal["temperature"],
+            alpha=float(alpha),
+            k_reg=1,
+            lam_reg=0.02,
+            epistemic_trust=np.array([ep_trust]) if model.forensic else None,
+            epistemic_threshold=model.epistemic_threshold,
+        )
         m_det = _mahalanobis_cached(study_dir, row["seed"], split, posteriors)
         m_scores = score_mahalanobis_forensics(d_slice.cpu().numpy(), m_det)
+        energy_scores = helmholtz_free_energy_forensics(d_slice.cpu().numpy(), temperature=cal["temperature"])
         patch_summary = {
             node: {
                 "prediction": int(info["prediction"][0]),
@@ -569,10 +608,13 @@ def inspect_example(study_dir: Path, index: int = 0, arm: str = "tether",
                 "conformal_q_hat": float(q_hat),
                 "conformal_set": raps["prediction_sets"][0],
                 "nex_conformal_set": nex_raps["prediction_sets"][0],
+                "wcp_conformal_set": wcp["prediction_sets"][0],
                 "source_weights": detail["source_weights"][0].tolist(), "expert_weights": detail["expert_weights"][0].tolist(),
                 "trust_score": detail["trust_score"][0].tolist(), "tail_entropy": detail["tail_entropy"][0].tolist(),
                 "mahalanobis_distance": m_scores["mahalanobis_distance"][0].tolist(),
                 "hybrid_trust": m_scores["hybrid_trust"][0].tolist(),
+                "tail_free_energy": energy_scores["tail_free_energy"][0].tolist(),
+                "spectral_participation_ratio": energy_scores["participation_ratio"][0].tolist(),
                 "expert_margin": detail["expert_margin"][0].tolist(), "damaged_experts": damaged_experts,
                 "epistemic_trust": ep_trust,
                 "aleatoric_uncertainty": float(detail["queried_aleatoric"][0]),
@@ -589,6 +631,33 @@ def inspect_example(study_dir: Path, index: int = 0, arm: str = "tether",
                 "shapley_interaction_matrix": shapley["interaction_matrix"][0].tolist(),
                 "shapley_efficiency_error": float(shapley["efficiency_error"][0]),
                 "coalition_payoffs": {k: round(float(v[0]), 4) for k, v in shapley["coalition_payoffs"].items()},
+                "pid": {
+                    "redundancy": round(float(pid["redundancy"][0]), 4),
+                    "unique_expert": [round(float(x), 4) for x in pid["unique_expert"][0].tolist()],
+                    "unique": [round(float(x), 4) for x in pid["unique_expert"][0].tolist()],
+                    "synergy": round(float(pid["synergy"][0]), 4),
+                    "total_information": round(float(pid["total_information"][0]), 4),
+                    "conservation_error": round(float((pid["redundancy"][0] + pid["unique_expert"][0].sum() + pid["synergy"][0] - pid["total_information"][0]).abs()), 6),
+                    "normalized_atoms": [round(float(x), 4) for x in pid["normalized_atoms"][0].tolist()],
+                    "normalized_shares": {
+                        "redundancy": round(float(pid["normalized_atoms"][0, 0]), 4),
+                        "unique": [round(float(x), 4) for x in pid["normalized_atoms"][0, 1:4].tolist()],
+                        "synergy": round(float(pid["normalized_atoms"][0, 4]), 4),
+                    },
+                },
+                "causal_mediation": {
+                    "nde_margin": round(float(mediation["nde_margin"][0]), 4),
+                    "nie_margin": round(float(mediation["nie_margin"][0]), 4),
+                    "nde_visual": round(float(mediation["nde_margin"][0]), 4),
+                    "nie_shortcut": round(float(mediation["nie_margin"][0]), 4),
+                    "total_effect_margin": round(float(mediation["total_effect_margin"][0]), 4),
+                    "visual_dominance": round(float(mediation["visual_dominance"][0]), 4),
+                    "visual_dominance_ratio": round(float(mediation["visual_dominance"][0]), 4),
+                    "nde_prob": round(float(mediation["nde_prob"][0]), 4),
+                    "nie_prob": round(float(mediation["nie_prob"][0]), 4),
+                },
+                "critical_corruption_threshold": round(float(crit["alpha_crit"][0]), 4),
+                "critical_immune": bool(crit["immune"][0]),
                 "interchange_patching": patch_summary,
                 "context": context[index].tolist(), "note": "Learned weights are routing summaries, not causal explanations. Compare controlled interventions."}
     finally:
@@ -600,7 +669,7 @@ def live_predict(study_dir: Path, pixels: list[float] | None = None,
                  tamper_mode: str = "none", corrupted_class: int = 4,
                  confidence: float = 0.991, arm: str = "tether",
                  seed: int | None = None, alpha: float = 0.05,
-                 defense: bool = False) -> dict:
+                 defense: bool = False, context_mode: str = "neutral") -> dict:
     """Run live interactive inference and tamper simulation on real/custom digit inputs."""
     study_dir = Path(study_dir).resolve()
     summary = json.loads((study_dir / "summary.json").read_text(encoding="utf-8"))
@@ -638,28 +707,42 @@ def live_predict(study_dir: Path, pixels: list[float] | None = None,
             specialist_logits = bank(stacked_images)
             clean_posteriors = specialist_logits.softmax(-1).unsqueeze(0)
 
+        clean_digit = int(clean_posteriors[0, source].mean(0).argmax().item())
+        expected_target = [clean_digit, (clean_digit + 1) % 10, 9 - clean_digit][operation]
+
         raw_posteriors, damaged_experts = _apply_tamper_tensor(
             clean_posteriors, source, tamper_mode, corrupted_class, confidence
         )
         sanitized_info = sanitize_specialist_posteriors(raw_posteriors.cpu().numpy(), m_det)
         sanitized_posteriors = torch.tensor(sanitized_info["sanitized_posteriors"], dtype=torch.float32)
         active_posteriors = sanitized_posteriors if defense else raw_posteriors
+        energy_scores = helmholtz_free_energy_forensics(raw_posteriors.cpu().numpy(), temperature=cal["temperature"])
 
         query_t = torch.tensor([[source, operation]], dtype=torch.long)
-        context_t = torch.full((1, 10), 0.1, dtype=torch.float32)
+        neutral_context_t = torch.full((1, 10), 0.1, dtype=torch.float32)
+        context_t = _make_context_tensor(context_mode, expected_target, corrupted_class, operation)
         with torch.no_grad():
             detail = model.inspect(active_posteriors, query_t, context_t)
             sanitized_detail = model.inspect(sanitized_posteriors, query_t, context_t)
-            clean_detail = model.inspect(clean_posteriors, query_t, context_t)
+            clean_detail = model.inspect(clean_posteriors, query_t, neutral_context_t)
             logits_np = detail["logits"].cpu().numpy()
             probabilities = detail["logits"].softmax(-1)[0].tolist()
             clean_target = clean_detail["logits"].argmax(-1)
             patching = model.interchange_intervention(
                 active_posteriors, query_t, context_t,
-                clean_posteriors, query_t, context_t,
+                clean_posteriors, query_t, neutral_context_t,
                 target=clean_target,
             )
             shapley = model.shapley_interactions(active_posteriors, query_t, context_t, target=clean_target)
+            pid = model.pid_decomposition(active_posteriors, query_t, context_t, target=clean_target)
+            mediation = model.causal_mediation(active_posteriors, query_t, context_t, target=clean_target)
+            crit = model.critical_corruption_threshold(
+                clean_posteriors, query_t, context_t,
+                corrupted_experts=damaged_experts if damaged_experts else (0, 1),
+                corrupted_class=corrupted_class,
+                stealth=str(tamper_mode).startswith("stealth"),
+                target=clean_target,
+            )
 
         attribution = model.attribute(active_posteriors, query_t, context_t)
         ig = model.integrated_gradients(active_posteriors, query_t, context_t, steps=128)
@@ -684,6 +767,18 @@ def live_predict(study_dir: Path, pixels: list[float] | None = None,
             epistemic_trust=np.array([effective_trust]) if (model.forensic or defense) else None,
             epistemic_threshold=model.epistemic_threshold,
         )
+        wcp = weighted_conformal_prediction_sets(
+            cal_scores=cal["val_scores"],
+            cal_shift_scores=cal["val_conflict"],
+            test_logits=logits_np,
+            test_shift_scores=np.array([conflict_val]),
+            temperature=cal["temperature"],
+            alpha=float(alpha),
+            k_reg=1,
+            lam_reg=0.02,
+            epistemic_trust=np.array([effective_trust]) if (model.forensic or defense) else None,
+            epistemic_threshold=model.epistemic_threshold,
+        )
         patch_summary = {
             node: {
                 "prediction": int(info["prediction"][0]),
@@ -702,6 +797,8 @@ def live_predict(study_dir: Path, pixels: list[float] | None = None,
             "operation": operation,
             "operation_label": operation_names[operation],
             "tamper_mode": tamper_mode,
+            "context_mode": str(context_mode),
+            "context": context_t[0].tolist(),
             "defense": bool(defense),
             "damaged_experts": damaged_experts,
             "prediction": pred_class,
@@ -715,12 +812,15 @@ def live_predict(study_dir: Path, pixels: list[float] | None = None,
             "conformal_q_hat": float(q_hat),
             "conformal_set": raps["prediction_sets"][0],
             "nex_conformal_set": nex_raps["prediction_sets"][0],
+            "wcp_conformal_set": wcp["prediction_sets"][0],
             "source_weights": detail["source_weights"][0].tolist(),
             "expert_weights": detail["expert_weights"][0].tolist(),
             "trust_score": detail["trust_score"][0].tolist(),
             "tail_entropy": detail["tail_entropy"][0].tolist(),
             "mahalanobis_distance": sanitized_info["mahalanobis_distance"][0, source].tolist(),
             "hybrid_trust": sanitized_info["hybrid_trust"][0, source].tolist(),
+            "tail_free_energy": energy_scores["tail_free_energy"][0, source].tolist(),
+            "spectral_participation_ratio": energy_scores["participation_ratio"][0, source].tolist(),
             "flagged_specialists": sanitized_info["flagged_specialists"][0, source].tolist(),
             "epistemic_trust": ep_trust,
             "hybrid_epistemic_trust": hybrid_queried_trust,
@@ -738,6 +838,33 @@ def live_predict(study_dir: Path, pixels: list[float] | None = None,
             "shapley_interaction_matrix": shapley["interaction_matrix"][0].tolist(),
             "shapley_efficiency_error": float(shapley["efficiency_error"][0]),
             "coalition_payoffs": {k: round(float(v[0]), 4) for k, v in shapley["coalition_payoffs"].items()},
+            "pid": {
+                "redundancy": round(float(pid["redundancy"][0]), 4),
+                "unique_expert": [round(float(x), 4) for x in pid["unique_expert"][0].tolist()],
+                "unique": [round(float(x), 4) for x in pid["unique_expert"][0].tolist()],
+                "synergy": round(float(pid["synergy"][0]), 4),
+                "total_information": round(float(pid["total_information"][0]), 4),
+                "conservation_error": round(float((pid["redundancy"][0] + pid["unique_expert"][0].sum() + pid["synergy"][0] - pid["total_information"][0]).abs()), 6),
+                "normalized_atoms": [round(float(x), 4) for x in pid["normalized_atoms"][0].tolist()],
+                "normalized_shares": {
+                    "redundancy": round(float(pid["normalized_atoms"][0, 0]), 4),
+                    "unique": [round(float(x), 4) for x in pid["normalized_atoms"][0, 1:4].tolist()],
+                    "synergy": round(float(pid["normalized_atoms"][0, 4]), 4),
+                },
+            },
+            "causal_mediation": {
+                "nde_margin": round(float(mediation["nde_margin"][0]), 4),
+                "nie_margin": round(float(mediation["nie_margin"][0]), 4),
+                "nde_visual": round(float(mediation["nde_margin"][0]), 4),
+                "nie_shortcut": round(float(mediation["nie_margin"][0]), 4),
+                "total_effect_margin": round(float(mediation["total_effect_margin"][0]), 4),
+                "visual_dominance": round(float(mediation["visual_dominance"][0]), 4),
+                "visual_dominance_ratio": round(float(mediation["visual_dominance"][0]), 4),
+                "nde_prob": round(float(mediation["nde_prob"][0]), 4),
+                "nie_prob": round(float(mediation["nie_prob"][0]), 4),
+            },
+            "critical_corruption_threshold": round(float(crit["alpha_crit"][0]), 4),
+            "critical_immune": bool(crit["immune"][0]),
             "specialist_predictions": raw_posteriors[0, source].argmax(-1).tolist(),
             "specialist_confidences": raw_posteriors[0, source].max(-1).values.tolist(),
             "interchange_patching": patch_summary,
@@ -751,7 +878,8 @@ def live_arena(study_dir: Path, pixels: list[float] | None = None,
                digit: int = 3, source: int = 0, operation: int = 0,
                tamper_mode: str = "clean", corrupted_class: int = 4,
                confidence: float = 0.991, seed: int | None = None,
-               alpha: float = 0.05, defense: bool = False) -> dict:
+               alpha: float = 0.05, defense: bool = False,
+               context_mode: str = "neutral") -> dict:
     """Compare all 7 receiver arms side-by-side and run a live adversarial phase-transition sweep."""
     study_dir = Path(study_dir).resolve()
     summary = json.loads((study_dir / "summary.json").read_text(encoding="utf-8"))
@@ -807,12 +935,14 @@ def live_arena(study_dir: Path, pixels: list[float] | None = None,
         posteriors = torch.tensor(san_info["sanitized_posteriors"], dtype=torch.float32) if defense else raw_posteriors
         intact_experts = [e for e in range(3) if e not in damaged_experts]
         query_t = torch.tensor([[source, operation]], dtype=torch.long)
-        context_t = torch.full((1, 10), 0.1, dtype=torch.float32)
+        neutral_context_t = torch.full((1, 10), 0.1, dtype=torch.float32)
         hybrid_queried_trust = float(san_info["hybrid_trust"][0, source].max())
 
         # Infer baseline digit from clean specialist consensus + task transform
         clean_digit = int(clean_posteriors[0, source].mean(0).argmax().item())
         expected_target = [clean_digit, (clean_digit + 1) % 10, 9 - clean_digit][operation]
+        context_t = _make_context_tensor(context_mode, expected_target, corrupted_class, operation)
+        target_t = torch.tensor([expected_target], dtype=torch.long)
 
         arm_results = []
         models_by_arm = {}
@@ -826,10 +956,19 @@ def live_arena(study_dir: Path, pixels: list[float] | None = None,
             q_hat = conformal_quantile(cal["val_scores"], alpha=float(alpha))
             with torch.no_grad():
                 detail = model.inspect(posteriors, query_t, context_t)
-                clean_detail = model.inspect(clean_posteriors, query_t, context_t)
+                clean_detail = model.inspect(clean_posteriors, query_t, neutral_context_t)
                 logits_np = detail["logits"].cpu().numpy()
                 probs = detail["logits"].softmax(-1)[0].tolist()
-                shapley = model.shapley_interactions(posteriors, query_t, context_t, target=torch.tensor([expected_target]))
+                shapley = model.shapley_interactions(posteriors, query_t, context_t, target=target_t)
+                pid = model.pid_decomposition(posteriors, query_t, context_t, target=target_t)
+                mediation = model.causal_mediation(posteriors, query_t, context_t, target=target_t)
+                crit = model.critical_corruption_threshold(
+                    clean_posteriors, query_t, context_t,
+                    corrupted_experts=damaged_experts if damaged_experts else (0, 1),
+                    corrupted_class=corrupted_class,
+                    stealth=str(tamper_mode).startswith("stealth"),
+                    target=target_t,
+                )
             cal_probs = softmax_temperature(logits_np, temperature=cal["temperature"])
             ep_trust = hybrid_queried_trust if defense else float(detail["epistemic_trust"][0])
             conflict_val = float(detail["queried_conflict_jsd"][0])
@@ -842,6 +981,18 @@ def live_arena(study_dir: Path, pixels: list[float] | None = None,
                 logits_np, temperature=cal["temperature"], q_hat=q_hat,
                 conflict_jsd=np.array([conflict_val]), cal_conflict_q95=cal["val_conflict_q95"],
                 k_reg=1, lam_reg=0.02,
+                epistemic_trust=np.array([ep_trust]) if (model.forensic or defense) else None,
+                epistemic_threshold=model.epistemic_threshold,
+            )
+            wcp = weighted_conformal_prediction_sets(
+                cal_scores=cal["val_scores"],
+                cal_shift_scores=cal["val_conflict"],
+                test_logits=logits_np,
+                test_shift_scores=np.array([conflict_val]),
+                temperature=cal["temperature"],
+                alpha=float(alpha),
+                k_reg=1,
+                lam_reg=0.02,
                 epistemic_trust=np.array([ep_trust]) if (model.forensic or defense) else None,
                 epistemic_threshold=model.epistemic_threshold,
             )
@@ -865,6 +1016,7 @@ def live_arena(study_dir: Path, pixels: list[float] | None = None,
                 "probabilities": probs,
                 "conformal_set": raps["prediction_sets"][0],
                 "nex_conformal_set": nex_raps["prediction_sets"][0],
+                "wcp_conformal_set": wcp["prediction_sets"][0],
                 "conformal_q_hat": float(q_hat),
                 "temperature": cal["temperature"],
                 "queried_source_weight": float(detail["source_weights"][0, source]),
@@ -872,6 +1024,14 @@ def live_arena(study_dir: Path, pixels: list[float] | None = None,
                 "intact_weight_share": float(intact_share),
                 "epistemic_trust": ep_trust,
                 "shapley_values": [round(float(x), 4) for x in shapley["shapley_values"][0].tolist()],
+                "pid_atoms": [round(float(x), 4) for x in pid["normalized_atoms"][0].tolist()],
+                "visual_dominance": round(float(mediation["visual_dominance"][0]), 4),
+                "visual_dominance_ratio": round(float(mediation["visual_dominance"][0]), 4),
+                "nde_margin": round(float(mediation["nde_margin"][0]), 4),
+                "nie_margin": round(float(mediation["nie_margin"][0]), 4),
+                "critical_threshold": round(float(crit["alpha_crit"][0]), 4),
+                "critical_corruption_threshold": round(float(crit["alpha_crit"][0]), 4),
+                "critical_immune": bool(crit["immune"][0]),
                 "survived": bool(survived),
             })
 
@@ -905,6 +1065,7 @@ def live_arena(study_dir: Path, pixels: list[float] | None = None,
             "source": source,
             "operation": operation,
             "tamper_mode": tamper_mode,
+            "context_mode": str(context_mode),
             "defense": bool(defense),
             "corrupted_class": corrupted_class,
             "confidence": confidence,
@@ -975,6 +1136,19 @@ def calibrate_study(study_dir: Path, alpha: float = 0.05, seed: int | None = Non
                     k_reg=1, lam_reg=0.02,
                     epistemic_trust=ep_trust, epistemic_threshold=model.epistemic_threshold,
                 )
+                wcp_eval = evaluate_weighted_conformal_sets(
+                    cal_scores=cal["val_scores"],
+                    cal_shift_scores=cal["val_conflict"],
+                    test_logits=logits,
+                    test_targets=targets,
+                    test_shift_scores=conflict_jsd,
+                    temperature=cal["temperature"],
+                    alpha=float(alpha),
+                    k_reg=1,
+                    lam_reg=0.02,
+                    epistemic_trust=ep_trust,
+                    epistemic_threshold=model.epistemic_threshold,
+                )
                 aci_eval = adaptive_conformal_inference(
                     cal["val_scores"], cal_probs, targets, alpha=float(alpha),
                     gamma=0.05, k_reg=1, lam_reg=0.02,
@@ -988,6 +1162,8 @@ def calibrate_study(study_dir: Path, alpha: float = 0.05, seed: int | None = Non
                     **conf_eval,
                     "nex_marginal_coverage": nex_eval["marginal_coverage"],
                     "nex_mean_set_size": nex_eval["mean_set_size"],
+                    "wcp_marginal_coverage": wcp_eval["wcp_marginal_coverage"],
+                    "wcp_mean_set_size": wcp_eval["wcp_mean_set_size"],
                     "aci_marginal_coverage": aci_eval["marginal_coverage"],
                     "aci_mean_set_size": aci_eval["mean_set_size"],
                 }

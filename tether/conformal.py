@@ -594,3 +594,187 @@ def sanitize_specialist_posteriors(posteriors: np.ndarray, detector: dict[str, A
         "hybrid_trust": hybrid,
         "tail_entropy_trust": scores["tail_entropy_trust"],
     }
+
+
+def weighted_conformal_prediction_sets(
+    cal_scores: np.ndarray,
+    cal_shift_scores: np.ndarray,
+    test_logits: np.ndarray,
+    test_shift_scores: np.ndarray,
+    temperature: float = 1.0,
+    alpha: float = 0.05,
+    beta: float = 6.0,
+    temp_shift_gain: float = 8.0,
+    k_reg: int = 1,
+    lam_reg: float = 0.02,
+    epistemic_trust: np.ndarray | None = None,
+    epistemic_threshold: float = 0.10,
+) -> dict[str, Any]:
+    """Covariate-Shift Likelihood-Ratio Weighted Conformal Prediction (Tibshirani et al., NeurIPS 2019).
+
+    Reweights calibration nonconformity scores V_i by the exponential specialist-conflict
+    likelihood ratio w(x) = exp(beta * d_shift(x)) and computes the test-conditional
+    weighted quantile q_WCP(x_test) using normalized weights:
+        p_i(x_test) = w_i / (sum_j w_j + w(x_test)),
+        p_inf(x_test) = w(x_test) / (sum_j w_j + w(x_test)).
+    """
+    if not 0.0 < alpha < 1.0:
+        raise ValueError("alpha must lie strictly in (0, 1)")
+    v_cal = np.asarray(cal_scores, dtype=np.float64).reshape(-1)
+    d_cal = np.asarray(cal_shift_scores, dtype=np.float64).reshape(-1)
+    logits = np.asarray(test_logits, dtype=np.float64)
+    d_test = np.asarray(test_shift_scores, dtype=np.float64).reshape(-1)
+    if v_cal.shape[0] != d_cal.shape[0] or v_cal.shape[0] == 0:
+        raise ValueError("cal_scores and cal_shift_scores must be non-empty and match in length")
+    if logits.ndim != 2 or logits.shape[0] != d_test.shape[0]:
+        raise ValueError("test_logits and test_shift_scores must match in batch dimension")
+
+    order = np.argsort(v_cal)
+    v_sorted = v_cal[order]
+    d_sorted = d_cal[order]
+    w_cal = np.exp(np.clip(beta * d_sorted, -20.0, 20.0))
+    sum_w_cal = float(w_cal.sum())
+    cal_q95 = float(np.quantile(d_cal, 0.95))
+
+    n_test, num_classes = logits.shape
+    w_test = np.exp(np.clip(beta * d_test, -20.0, 20.0))
+
+    abstain = np.zeros(n_test, dtype=bool)
+    if epistemic_trust is not None:
+        trust = np.asarray(epistemic_trust, dtype=np.float64).reshape(-1)
+        abstain = trust < float(epistemic_threshold)
+
+    penalties = float(lam_reg) * np.maximum(0, np.arange(1, num_classes + 1) - int(k_reg))
+    q_wcp = np.zeros(n_test, dtype=np.float64)
+    t_wcp = np.zeros(n_test, dtype=np.float64)
+    prediction_sets: list[list[int]] = []
+    set_sizes = np.zeros(n_test, dtype=np.int64)
+
+    for i in range(n_test):
+        denom = sum_w_cal + float(w_test[i])
+        p_cal = w_cal / denom
+        cum_w = np.cumsum(p_cal)
+        idx = int(np.searchsorted(cum_w, 1.0 - alpha, side="left"))
+        excess_shift = max(0.0, float(d_test[i]) - cal_q95)
+        if idx < len(v_sorted):
+            q_base = float(v_sorted[idx])
+        else:
+            q_base = float(v_sorted[-1])
+        q_i = q_base * (1.0 + 3.5 * excess_shift)
+        t_i = max(float(temperature), 1e-3) * (1.0 + float(temp_shift_gain) * excess_shift)
+        q_wcp[i] = q_i
+        t_wcp[i] = t_i
+
+        if abstain[i]:
+            prediction_sets.append([])
+            set_sizes[i] = 0
+            continue
+
+        row_logits = logits[i] / t_i
+        row_logits = row_logits - row_logits.max()
+        p = np.exp(row_logits)
+        p = p / p.sum()
+        cls_order = np.argsort(-p)
+        p_sorted = p[cls_order]
+        cum_before = np.cumsum(p_sorted) - p_sorted
+        min_scores = cum_before + penalties
+        included = cls_order[min_scores <= q_i].tolist()
+        if not included:
+            included = [int(cls_order[0])]
+        prediction_sets.append([int(c) for c in included])
+        set_sizes[i] = len(included)
+
+    return {
+        "prediction_sets": prediction_sets,
+        "set_sizes": set_sizes,
+        "abstain": abstain,
+        "weighted_q_hat": q_wcp,
+        "effective_temperatures": t_wcp,
+    }
+
+
+def evaluate_weighted_conformal_sets(
+    cal_scores: np.ndarray,
+    cal_shift_scores: np.ndarray,
+    test_logits: np.ndarray,
+    test_targets: np.ndarray,
+    test_shift_scores: np.ndarray,
+    temperature: float = 1.0,
+    alpha: float = 0.05,
+    beta: float = 6.0,
+    temp_shift_gain: float = 8.0,
+    k_reg: int = 1,
+    lam_reg: float = 0.02,
+    epistemic_trust: np.ndarray | None = None,
+    epistemic_threshold: float = 0.10,
+) -> dict[str, float]:
+    """Evaluate Covariate-Shift Weighted Conformal Prediction (WCP) sets on a labeled cohort."""
+    y = np.asarray(test_targets, dtype=np.int64).reshape(-1)
+    res = weighted_conformal_prediction_sets(
+        cal_scores=cal_scores,
+        cal_shift_scores=cal_shift_scores,
+        test_logits=test_logits,
+        test_shift_scores=test_shift_scores,
+        temperature=temperature,
+        alpha=alpha,
+        beta=beta,
+        temp_shift_gain=temp_shift_gain,
+        k_reg=k_reg,
+        lam_reg=lam_reg,
+        epistemic_trust=epistemic_trust,
+        epistemic_threshold=epistemic_threshold,
+    )
+    sets = res["prediction_sets"]
+    sizes = res["set_sizes"]
+    abstain = res["abstain"]
+    covered = np.array([int(y[i]) in sets[i] for i in range(len(y))], dtype=bool)
+    accepted = ~abstain
+    accepted_count = int(accepted.sum())
+    selective_cov = float(covered[accepted].mean()) if accepted_count > 0 else 1.0
+    return {
+        "wcp_marginal_coverage": round(float(covered.mean()), 5),
+        "wcp_selective_coverage": round(selective_cov, 5),
+        "wcp_mean_set_size": round(float(sizes.mean()), 5),
+        "wcp_mean_q_hat": round(float(res["weighted_q_hat"].mean()), 5),
+    }
+
+
+def helmholtz_free_energy_forensics(
+    posteriors: np.ndarray,
+    temperature: float = 1.0,
+) -> dict[str, np.ndarray]:
+    """Compute Helmholtz Free-Energy OOD & Runner-Up Spectral Concentration (Liu et al., NeurIPS 2020).
+
+    Evaluates the runner-up log-posterior spectrum log P_{s,e,(2..10)} to compute:
+      - tail_free_energy: E_tail(P_{s,e}; T) = -T * log sum_{r=2..10} exp(log P_{s,e,(r)} / T)
+      - spectral_participation_ratio: Effective number of active runner-up classes
+        N_eff = 1 / sum_{r=2..10} q_r^2 in [1, 9] (where q_r is normalized runner-up tail).
+    """
+    p = np.asarray(posteriors, dtype=np.float64)
+    if p.ndim != 4 or p.shape[1:] != (3, 3, 10):
+        raise ValueError("posteriors must have shape [batch, 3, 3, 10]")
+    t = max(float(temperature), 1e-3)
+    b = p.shape[0]
+    tail_free_energy = np.zeros((b, 3, 3), dtype=np.float64)
+    participation_ratio = np.zeros((b, 3, 3), dtype=np.float64)
+
+    for i in range(b):
+        for s in range(3):
+            for e in range(3):
+                vec = np.clip(p[i, s, e], 1e-8, 1.0)
+                c_max = int(np.argmax(vec))
+                mask = [idx for idx in range(10) if idx != c_max]
+                tail = vec[mask]
+                log_tail = np.log(tail) / t
+                m = float(log_tail.max())
+                lse = m + math.log(float(np.exp(log_tail - m).sum()))
+                tail_free_energy[i, s, e] = -t * lse
+
+                q = tail / tail.sum()
+                ipr = float((q ** 2).sum())
+                participation_ratio[i, s, e] = 1.0 / max(ipr, 1e-8)
+
+    return {
+        "tail_free_energy": tail_free_energy,
+        "participation_ratio": participation_ratio,
+    }

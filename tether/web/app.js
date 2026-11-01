@@ -106,7 +106,7 @@ async function loadStudy() {
     byId("study-status").classList.toggle("unavailable",!complete);
     const config=study.config || {};
     const proto=config.protocol || "v1";
-    if(byId("protocol-version")) byId("protocol-version").textContent="v0.4 ("+proto+")";
+    if(byId("protocol-version")) byId("protocol-version").textContent="v0.6 ("+proto+")";
     byId("study-config").textContent=study.rows.length+" arm records · "+human(config.phase||config.stage||"saved evaluation")+" ("+proto+")";
     const seeds=[...new Set(study.rows.map(x=>x.seed))].sort((a,b)=>a-b);
     const seedSelect=byId("seed-select");
@@ -241,6 +241,7 @@ function renderExample(data) {
       insShapley.append(row);
     });
   }
+  renderPidBars(byId("inspector-pid"), byId("inspector-pid-meta"), data.pid);
   const patchBox=byId("inspector-patching");
   if(patchBox && data.interchange_patching){
     patchBox.replaceChildren();
@@ -378,11 +379,113 @@ function pgInitCanvas(){
     if(byId("pg-conformal-label")) byId("pg-conformal-label").innerHTML="SPLIT CONFORMAL SET C<sub>"+cov.toFixed(2)+"</sub>(x)";
     scheduleLivePredict();
   });
-  ["pg-arm-select","pg-source-select","pg-op-select","pg-corrupt-class","pg-defense"].forEach(id=>{
+  ["pg-arm-select","pg-source-select","pg-op-select","pg-context-mode","pg-corrupt-class","pg-defense"].forEach(id=>{
     byId(id)?.addEventListener("change",scheduleLivePredict);
   });
+  initReceiptDialog();
   window.pgRedrawCanvas=redraw;
   loadPresetDigit(pgDigit);
+}
+let lastLiveData=null;
+function renderPidBars(container, metaNode, pid){
+  if(!container||!pid)return;
+  container.replaceChildren();
+  const shares=pid.normalized_shares||{};
+  if(metaNode && finite(pid.total_information)){
+    metaNode.textContent="I = "+pid.total_information.toFixed(2)+" nats (Δ="+Number(pid.conservation_error||0).toFixed(4)+")";
+  }
+  const items=[
+    ["Redundancy R", Number(shares.redundancy||0), "#578776"],
+    ["Unique U₀ (A)", Number(shares.unique?.[0]||0), "#7358cf"],
+    ["Unique U₁ (B)", Number(shares.unique?.[1]||0), "#8a72cf"],
+    ["Unique U₂ (C)", Number(shares.unique?.[2]||0), "#9b83d9"],
+    ["Synergy S", Number(shares.synergy||0), "#ce874a"]
+  ];
+  items.forEach(([label,val,color])=>{
+    const row=element("div",undefined,"saliency-row");
+    row.style.gridTemplateColumns="84px minmax(20px,1fr) 48px";
+    row.append(element("span",label));
+    const track=element("div",undefined,"saliency-track"), fill=element("div",undefined,"saliency-fill");
+    fill.style.width=Math.max(0,Math.min(100,val*100))+"%";
+    fill.style.background=color;
+    track.append(fill);
+    row.append(track,element("span",percentage(val),"saliency-val"));
+    container.append(row);
+  });
+}
+function initReceiptDialog(){
+  const dialog=byId("circuit-receipt-dialog");
+  const openBtn=byId("pg-open-receipt");
+  const closeBtn=byId("close-receipt-dialog");
+  if(!dialog)return;
+  if(openBtn){
+    openBtn.addEventListener("click",()=>{
+      populateReceiptDialog(lastLiveData);
+      dialog.showModal();
+    });
+  }
+  if(closeBtn){
+    closeBtn.addEventListener("click",()=>dialog.close());
+  }
+  if(!("closedBy" in HTMLDialogElement.prototype)){
+    dialog.addEventListener("click",(event)=>{
+      const rect=dialog.getBoundingClientRect();
+      const clickedInDialog=(
+        rect.top<=event.clientY &&
+        event.clientY<=rect.top+rect.height &&
+        rect.left<=event.clientX &&
+        event.clientX<=rect.left+rect.width
+      );
+      if(!clickedInDialog){
+        dialog.close();
+      }
+    });
+  }
+}
+function populateReceiptDialog(data){
+  const body=byId("circuit-receipt-body");
+  if(!body||!data)return;
+  body.replaceChildren();
+  const pid=data.pid||{};
+  const med=data.causal_mediation||{};
+  const fe=data.tail_free_energy||{};
+  const grid=element("div",undefined,"receipt-grid");
+  const b1=element("div",undefined,"receipt-box");
+  b1.append(
+    element("strong","1. Williams-Beer PID (arXiv:1004.2515)"),
+    element("div","Total Directed Info I(012; y*) = "+Number(pid.total_information||0).toFixed(3)+" nats"),
+    element("div","Shared Redundancy R = "+Number(pid.redundancy||0).toFixed(3)+" ("+percentage(pid.normalized_shares?.redundancy)+")"),
+    element("div","Unique [U₀, U₁, U₂] = ["+(pid.unique||[0,0,0]).map(x=>Number(x).toFixed(2)).join(", ")+"]"),
+    element("div","Coalitional Synergy S = "+Number(pid.synergy||0).toFixed(3)+" · Conservation Δ = "+Number(pid.conservation_error||0).toFixed(6))
+  );
+  const b2=element("div",undefined,"receipt-box");
+  b2.append(
+    element("strong","2. Causal Mediation & Crit Breakdown (Vig et al. 2020)"),
+    element("div","Visual NDE = "+Number(med.nde_visual||0).toFixed(3)+" · Shortcut NIE = "+Number(med.nie_shortcut||0).toFixed(3)),
+    element("div","Visual Dominance Ratio ρ_vis = "+percentage(med.visual_dominance_ratio)),
+    element("div","Critical Breakdown α*_crit = "+(finite(data.critical_corruption_threshold)?percentage(data.critical_corruption_threshold):"—")),
+    element("div","Context Mode = "+String(data.context_mode||"neutral").toUpperCase())
+  );
+  const b3=element("div",undefined,"receipt-box");
+  b3.append(
+    element("strong","3. Weighted Conformal Prediction (Tibshirani et al. 2019)"),
+    element("div","Standard RAPS Set C(x) = {"+(data.conformal_set||[]).join(", ")+"}"),
+    element("div","Weighted Set C_w(x) = {"+(data.wcp_conformal_set||data.conformal_set||[]).join(", ")+"}"),
+    element("div","Shift Distance d_shift(x) = "+Number(data.wcp_shift_distance||0).toFixed(3)+" · q̂_w = "+Number(data.wcp_q_hat||data.conformal_q_hat||0).toFixed(3))
+  );
+  const b4=element("div",undefined,"receipt-box");
+  const eEnergies=Array.isArray(data.tail_free_energy)?data.tail_free_energy:[0,0,0];
+  const nEff=Array.isArray(data.spectral_participation_ratio)?data.spectral_participation_ratio:[1,1,1];
+  b4.append(
+    element("strong","4. Helmholtz Tail Free Energy (Liu et al. 2020)"),
+    element("div","Queried Source E_tail = ["+eEnergies.map(x=>Number(x).toFixed(2)).join(", ")+"]"),
+    element("div","Effective Runner-up Support N_eff = ["+nEff.map(x=>Number(x).toFixed(2)).join(", ")+"] / 9.0"),
+    element("div","Mahalanobis D_M = ["+(data.mahalanobis_distance||[0,0,0]).map(x=>Number(x).toFixed(1)).join(", ")+"]")
+  );
+  grid.append(b1,b2,b3,b4);
+  const coal=element("div",undefined,"receipt-mono");
+  coal.textContent="2³ Coalition Payoff Lattice (logits): "+JSON.stringify(data.coalition_payoffs||{});
+  body.append(grid,coal);
 }
 function scheduleLivePredict(){clearTimeout(pgDebounceTimer);pgDebounceTimer=setTimeout(runLivePredict,80);}
 async function loadPresetDigit(digit){
@@ -395,7 +498,8 @@ async function loadPresetDigit(digit){
       tamper_mode:pgTamper,
       arm:byId("pg-arm-select")?.value||"tether",
       alpha:String(pgGetAlpha().toFixed(3)),
-      defense:byId("pg-defense")?.checked?"1":"0"
+      defense:byId("pg-defense")?.checked?"1":"0",
+      context_mode:byId("pg-context-mode")?.value||"neutral"
     });
     if(seedVal)params.append("seed",seedVal);
     const res=await api("/api/live_predict?"+params);
@@ -420,7 +524,8 @@ async function runLivePredict(){
     confidence:Number(byId("pg-confidence")?.value||0.99),
     arm:byId("pg-arm-select")?.value||"tether",
     alpha:Number(pgGetAlpha().toFixed(3)),
-    defense:Boolean(byId("pg-defense")?.checked)
+    defense:Boolean(byId("pg-defense")?.checked),
+    context_mode:byId("pg-context-mode")?.value||"neutral"
   };
   const seedVal=byId("seed-select")?.value;
   if(seedVal)body.seed=Number(seedVal);
@@ -461,7 +566,8 @@ async function runLiveArena(){
     corrupted_class:Number(byId("pg-corrupt-class")?.value||4),
     confidence:Number(byId("pg-confidence")?.value||0.99),
     alpha:Number(pgGetAlpha().toFixed(3)),
-    defense:Boolean(byId("pg-defense")?.checked)
+    defense:Boolean(byId("pg-defense")?.checked),
+    context_mode:byId("pg-context-mode")?.value||"neutral"
   };
   const seedVal=byId("seed-select")?.value;
   if(seedVal)body.seed=Number(seedVal);
@@ -476,15 +582,17 @@ async function runLiveArena(){
   }catch(_){}
 }
 function renderLiveOutput(data){
+  lastLiveData=data;
   const isAbstain=Boolean(data.abstain);
   byId("pg-pred-digit").textContent=isAbstain?"∅":String(data.prediction??"—");
   byId("pg-raw-digit").textContent=String(data.prediction??"—");
   byId("pg-decision-badge").textContent=isAbstain?"SAFE ABSTAIN":"TRUSTED";
   byId("pg-decision-badge").className="tag "+(isAbstain?"wrong":"safe");
   byId("pg-abstain-banner")?.classList.toggle("hidden",!isAbstain);
-  renderConformalChips(byId("pg-conformal-set"), data.conformal_set, isAbstain, data.prediction);
+  renderConformalChips(byId("pg-conformal-set"), data.wcp_conformal_set||data.conformal_set, isAbstain, data.prediction);
   if(byId("pg-conformal-meta") && finite(data.temperature) && finite(data.conformal_q_hat)){
-    byId("pg-conformal-meta").textContent="T* = "+data.temperature.toFixed(2)+" · q̂ = "+data.conformal_q_hat.toFixed(3);
+    const qw=finite(data.wcp_q_hat)?data.wcp_q_hat:data.conformal_q_hat;
+    byId("pg-conformal-meta").textContent="T* = "+data.temperature.toFixed(2)+" · q̂_w = "+qw.toFixed(3);
   }
   const trust=Number(data.epistemic_trust??0);
   byId("pg-trust-percent").textContent=percentage(trust);
@@ -552,6 +660,23 @@ function renderLiveOutput(data){
       pgShapley.append(row);
     });
   }
+  renderPidBars(byId("pg-pid-breakdown"), byId("pg-pid-meta"), data.pid);
+  const medPills=byId("pg-mediation-pills");
+  if(medPills && data.causal_mediation){
+    medPills.replaceChildren();
+    const med=data.causal_mediation;
+    const critAlpha=data.critical_corruption_threshold;
+    if(byId("pg-mediation-meta")){
+      byId("pg-mediation-meta").textContent="ρ_vis = "+percentage(med.visual_dominance_ratio)+" · α* = "+(finite(critAlpha)?percentage(critAlpha):"—");
+    }
+    const p1=element("div",undefined,"trust-pill");
+    p1.append(element("strong","Visual NDE"),element("span",(med.nde_visual>=0?"+":"")+Number(med.nde_visual||0).toFixed(2)+" logits"));
+    const p2=element("div",undefined,"trust-pill"+(Math.abs(med.nie_shortcut||0)>1.0?" damaged":""));
+    p2.append(element("strong","Shortcut NIE"),element("span",(med.nie_shortcut>=0?"+":"")+Number(med.nie_shortcut||0).toFixed(2)+" logits"));
+    const p3=element("div",undefined,"trust-pill");
+    p3.append(element("strong","Crit Breakdown α*"),element("span",finite(critAlpha)?("Flip at "+percentage(critAlpha)):"Unbreakable (1.0)"));
+    medPills.append(p1,p2,p3);
+  }
   const damagedSet=new Set(Array.isArray(data.damaged_experts)?data.damaged_experts:[]);
   byId("pg-damaged-notice").textContent=damagedSet.size?(damagedSet.size+" Corrupted"+(data.defense?" · Sanitized":"")):"3 Intact";
   const pills=byId("pg-trust-pills");pills.replaceChildren();
@@ -578,10 +703,13 @@ function renderLiveArena(arena){
       tr.append(element("th",armNames[item.arm]||item.arm));
       const predText=item.abstain?"∅ (Abstain)":"ŷ = "+item.prediction;
       tr.append(element("td",predText));
-      const setStr=item.abstain||!item.conformal_set?.length?"∅":"{"+item.conformal_set.join(", ")+"}";
+      const cSet=item.wcp_conformal_set||item.conformal_set;
+      const setStr=item.abstain||!cSet?.length?"∅":"{"+cSet.join(", ")+"}";
       tr.append(element("td",setStr));
       tr.append(element("td",percentage(item.target_probability)));
-      tr.append(element("td",percentage(item.intact_weight_share)));
+      const visDom=finite(item.visual_dominance_ratio)?percentage(item.visual_dominance_ratio):percentage(item.intact_weight_share);
+      const critA=finite(item.critical_corruption_threshold)?percentage(item.critical_corruption_threshold):"—";
+      tr.append(element("td",visDom+" / "+critA));
       const tdStatus=element("td");
       const badge=element("span",item.abstain?"SAFE ABSTAIN":(item.survived?"SURVIVED":"HIJACKED"),"tag "+(item.survived?"safe":"danger"));
       tdStatus.append(badge);

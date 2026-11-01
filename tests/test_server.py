@@ -167,13 +167,20 @@ def test_live_predict_endpoints():
         assert post_payload["selective_prediction"] == -1
         assert post_payload["conformal_set"] == []
 
-        # Live 7-arm arena endpoint with stealth attack & Mahalanobis defense
-        arena_data = json.dumps({"digit": 7, "tamper_mode": "stealth_2", "corrupted_class": 2, "defense": True}).encode("utf-8")
+        # Live 7-arm arena endpoint with stealth attack, Mahalanobis defense & adversarial context cue
+        arena_data = json.dumps({
+            "digit": 7, "tamper_mode": "stealth_2", "corrupted_class": 2,
+            "defense": True, "context_mode": "adversarial"
+        }).encode("utf-8")
         status, _, body = request(port, "/api/live_arena", method="POST", body=arena_data, headers={"Content-Type": "application/json"})
         assert status == 200
         arena_payload = json.loads(body)
         assert len(arena_payload["arms"]) == 7
         assert arena_payload["defense"] is True
+        assert arena_payload["context_mode"] == "adversarial"
+        assert "visual_dominance_ratio" in arena_payload["arms"][0]
+        assert "critical_corruption_threshold" in arena_payload["arms"][0]
+        assert "wcp_conformal_set" in arena_payload["arms"][0]
         assert "sweep" in arena_payload
 
         # Conformal calibration endpoint

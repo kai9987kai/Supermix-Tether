@@ -20,15 +20,15 @@
       <a class="nav-item" href="#comparisons"><span>≋</span> Arm comparisons</a>
       <a class="nav-item" href="#protocol"><span>⌘</span> Method & provenance</a>
     </nav>
-    <div class="sidebar-note"><span class="status-dot"></span> Runs on this computer<p>Saved study · CPU inference<br>Conformal + Shapley + Forensics</p></div>
-    <div class="sidebar-footer">SUPERMIX RESEARCH <span id="protocol-version">v0.5</span></div>
+    <div class="sidebar-note"><span class="status-dot"></span> Runs on this computer<p>Saved study · CPU inference<br>PID + WCP + Causal Mediation</p></div>
+    <div class="sidebar-footer">SUPERMIX RESEARCH <span id="protocol-version">v0.6</span></div>
   </aside>
 
   <div class="workspace">
-    <header class="topbar"><div><span class="breadcrumb">Laboratories</span><span class="slash">/</span><strong>Specialist use &amp; conformal forensics</strong></div><div class="topbar-links"><a class="quiet-link" href="/api/conformal" target="_blank" rel="noopener">Conformal JSON <span>↗</span></a><a class="quiet-link" href="/api/results" target="_blank" rel="noopener">Study JSON <span>↗</span></a></div></header>
+    <header class="topbar"><div><span class="breadcrumb">Laboratories</span><span class="slash">/</span><strong>Specialist use, PID &amp; conformal forensics</strong></div><div class="topbar-links"><a class="quiet-link" href="/api/conformal" target="_blank" rel="noopener">Conformal JSON <span>↗</span></a><a class="quiet-link" href="/api/results" target="_blank" rel="noopener">Study JSON <span>↗</span></a></div></header>
     <main>
       <section id="overview" class="intro">
-        <div class="eyebrow"><span class="status-dot"></span> CAUSAL-USE &amp; CONFORMAL FORENSICS EXPERIMENT <span class="version-pill">CPU LOCAL · v0.5</span></div>
+        <div class="eyebrow"><span class="status-dot"></span> CAUSAL-USE, PID &amp; CONFORMAL FORENSICS EXPERIMENT <span class="version-pill">CPU LOCAL · v0.6</span></div>
         <div class="title-row"><div><h1>Do specialists change<br>the answer?</h1><p class="lead">Trace what a receiver uses, isolate majority corruption via dark-knowledge forensics, and bound uncertainty with split conformal prediction sets and causal circuit patching.</p></div><div class="study-state"><span id="study-status" class="pill">Loading saved study</span><p id="study-config">Reading local evidence…</p></div></div>
         <div id="study-error" class="notice hidden" role="status"></div>
         <div class="stat-grid">
@@ -93,7 +93,9 @@
             <div id="inspector-saliency" class="saliency-bars"></div>
             <div class="expert-heading"><span>Cooperative Shapley Values (&phi;<sub>e</sub>) &amp; Coalitions</span><span id="inspector-shapley-err">Efficiency Δ = 0</span></div>
             <div id="inspector-shapley" class="saliency-bars"></div>
-            <p class="fine-print">IG integrates gradients along the simplex; Shapley values &phi;<sub>e</sub> compute exact payoffs across all 2&sup3; = 8 specialist coalitions.</p>
+            <div class="expert-heading"><span>Partial Information Decomposition (PID: R, U<sub>e</sub>, S)</span><span id="inspector-pid-meta">Williams-Beer I<sub>min</sub></span></div>
+            <div id="inspector-pid" class="saliency-bars"></div>
+            <p class="fine-print">IG integrates gradients along the simplex; Shapley &phi;<sub>e</sub> and PID atoms (Redundancy R, Unique U<sub>e</sub>, Synergy S) decompose all 2&sup3; = 8 coalitions.</p>
           </article>
         </div>
       </section>
@@ -161,6 +163,13 @@
                       <option value="2">Mirror (9 - x)</option>
                     </select>
                   </label>
+                  <label>Context Proxy Cue
+                    <select id="pg-context-mode">
+                      <option value="neutral">Neutral (Uniform 0.1)</option>
+                      <option value="correlated">Correlated Cue (Target)</option>
+                      <option value="adversarial">Adversarial Reversed Cue</option>
+                    </select>
+                  </label>
                 </div>
                 <div class="tamper-box">
                   <div class="tamper-title">
@@ -223,7 +232,10 @@
           <article class="card prediction-card">
             <div class="card-heading">
               <h3>Live Receiver Output</h3>
-              <span id="pg-decision-badge" class="tag correct">TRUSTED</span>
+              <div style="display:flex;gap:6px;align-items:center">
+                <button id="pg-open-receipt" type="button" class="btn-sm" title="Open mathematical &amp; circuit PID receipt modal">Circuit Receipt ↗</button>
+                <span id="pg-decision-badge" class="tag correct">TRUSTED</span>
+              </div>
             </div>
             <div class="answer-row">
               <div>
@@ -273,6 +285,16 @@
             </div>
             <div id="pg-shapley-breakdown" class="saliency-bars"></div>
             <div class="expert-heading">
+              <span>Partial Information Decomposition (PID: R, U<sub>e</sub>, S)</span>
+              <span id="pg-pid-meta">Conservation Σ = I<sub>total</sub></span>
+            </div>
+            <div id="pg-pid-breakdown" class="saliency-bars"></div>
+            <div class="expert-heading">
+              <span>Causal Mediation (NDE<sub>vis</sub> vs NIE<sub>cue</sub>) &amp; Crit &alpha;*</span>
+              <span id="pg-mediation-meta">&rho;<sub>vis</sub> = — · &alpha;* = —</span>
+            </div>
+            <div id="pg-mediation-pills" class="trust-pills"></div>
+            <div class="expert-heading">
               <span>Queried Specialist Trust, Mahalanobis D<sub>M</sub> &amp; Weights</span>
               <span id="pg-damaged-notice">3 Intact</span>
             </div>
@@ -299,9 +321,9 @@
                   <tr>
                     <th scope="col">Receiver Arm</th>
                     <th scope="col">Selective Pred</th>
-                    <th scope="col">Conformal Set C(x)</th>
+                    <th scope="col">WCP Set C<sub>w</sub>(x)</th>
                     <th scope="col">Target Prob</th>
-                    <th scope="col">Intact Wt</th>
+                    <th scope="col">Vis Dom &rho; / Crit &alpha;*</th>
                     <th scope="col">Status</th>
                   </tr>
                 </thead>
@@ -338,10 +360,22 @@
       </section>
 
       <section id="protocol" class="protocol-layout">
-        <article class="card"><span class="eyebrow">05 / RESEARCH BOUNDARY</span><h3>Measure useful dependence.</h3><p>Tether combines relevant intervention-effect matching with invariance to irrelevant and damaged-expert changes, augmented in v0.4 with Split Conformal Prediction (RAPS), Axiomatic Integrated Gradients, and Causal Interchange Patching.</p><div class="protocol-grid"><div><strong>Real images, small domain</strong><p>1,797 sklearn digits. Image identities split before task generation. Conformal calibration uses the validation split only.</p></div><div><strong>Controlled challenges</strong><p>Withheld source × operation pairs, proxy-cue shifts, donor erasure and 1/3, 2/3, and 3/3 specialist corruption.</p></div></div><p class="fine-print">This is a bounded experimental model. Accuracy, routing weights, conformal sets and checksums do not establish semantic understanding, general intelligence or real-world safety.</p></article>
+        <article class="card"><span class="eyebrow">05 / RESEARCH BOUNDARY</span><h3>Measure useful dependence.</h3><p>Tether combines relevant intervention-effect matching with invariance to irrelevant and damaged-expert changes, augmented in v0.6 with Multivariate Partial Information Decomposition (PID), Likelihood-Ratio Weighted Conformal Prediction (WCP), Causal Mediation (NDE/NIE), and Certified Critical Breakdown (&alpha;*).</p><div class="protocol-grid"><div><strong>Real images, small domain</strong><p>1,797 sklearn digits. Image identities split before task generation. Conformal calibration uses the validation split only.</p></div><div><strong>Controlled challenges</strong><p>Withheld source × operation pairs, proxy-cue shifts, donor erasure and 1/3, 2/3, and 3/3 specialist corruption.</p></div></div><p class="fine-print">This is a bounded experimental model. Accuracy, routing weights, conformal sets and checksums do not establish semantic understanding, general intelligence or real-world safety.</p></article>
         <article class="card provenance-card"><span class="eyebrow">06 / SAVED EVIDENCE</span><h3>Provenance &amp; decision</h3><dl id="provenance"><dt>Study</dt><dd>Awaiting saved results</dd></dl><details><summary>Recorded decision</summary><pre id="decision-detail">No decision loaded.</pre></details></article>
       </section>
       <footer>SUPERMIX TETHER <span>Small models. Inspectable interventions. Evidence before claims.</span><a href="#overview">Back to top ↑</a></footer>
+      <dialog id="circuit-receipt-dialog" class="receipt-dialog" closedby="any" aria-labelledby="circuit-receipt-title">
+        <div class="receipt-header">
+          <div>
+            <span class="eyebrow">MATHEMATICAL &amp; CAUSAL CIRCUIT RECEIPT · v0.6</span>
+            <h3 id="circuit-receipt-title">Multivariate PID, Causal Mediation &amp; Weighted Conformal Receipt</h3>
+          </div>
+          <button id="close-receipt-dialog" type="button" class="btn-sm" aria-label="Close circuit receipt modal">Close ✕</button>
+        </div>
+        <div id="circuit-receipt-body" class="receipt-body">
+          <p class="muted">Run a live prediction or select an arm in the playground to inspect its 2&sup3; coalition lattice and PID conservation law.</p>
+        </div>
+      </dialog>
     </main>
   </div>
 </body>

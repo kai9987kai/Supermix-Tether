@@ -442,6 +442,235 @@ class TetherReceiver(nn.Module):
             "taylor_efficiency_error": taylor_efficiency_error,
         }
 
+    def pid_decomposition(self, donors, query, context, target=None):
+        """Compute Williams-Beer (2010) Partial Information Decomposition (PID) across the 3 specialists.
+
+        Decomposes the point-wise directed predictive information gain (in nats)
+        toward the target class over the uniform baseline coalition into non-negative
+        information atoms:
+          - Shared Redundancy (R_shared): Information redundantly available across specialists.
+          - Unique Specialist Information (U_0, U_1, U_2): Information exclusively held by
+            specialist e beyond any other specialist (crucial under 2/3 corruption).
+          - Coalitional Circuit Synergy (S_syn): Emergent information unlocked only when
+            specialists are combined through the receiver's non-linear reliability router.
+        """
+        _inputs(donors, query, context)
+        dtype = self.task_matrices.dtype
+        batch_size = donors.shape[0]
+        device = donors.device
+        p = donors.detach().to(dtype=dtype)
+        c_tensor = context.detach().to(dtype=dtype)
+
+        with torch.no_grad():
+            full_detail = self._compute(p, query, c_tensor, detach_donors=True)
+            full_logits = full_detail["logits"]
+            if target is None:
+                chosen_target = full_logits.argmax(dim=-1)
+            else:
+                _target(target, "target", batch_size, device)
+                chosen_target = target
+
+            uniform = torch.full_like(p, 0.1)
+            coalition_tensors = []
+            for mask_int in range(8):
+                coalition_p = p.clone()
+                for e in range(3):
+                    if not (mask_int & (1 << e)):
+                        for b in range(batch_size):
+                            s_idx = int(query[b, 0])
+                            coalition_p[b, s_idx, e] = uniform[b, s_idx, e]
+                coalition_tensors.append(coalition_p)
+
+            batched_p = torch.cat(coalition_tensors, dim=0)
+            batched_q = query.repeat(8, 1)
+            batched_c = c_tensor.repeat(8, 1)
+            batched_probs = self._compute(batched_p, batched_q, batched_c, detach_donors=True)["logits"].softmax(dim=-1)
+            batched_probs = batched_probs.view(8, batch_size, 10)
+
+            rows = torch.arange(batch_size, device=device)
+            target_probs = batched_probs[:, rows, chosen_target].clamp_min(1e-8)
+            base_prob = target_probs[0]
+            info = (target_probs.log() - base_prob.log()).clamp_min(0.0)
+
+            i0 = info[1]
+            i1 = info[2]
+            i2 = info[4]
+            i012 = info[7]
+            singletons = torch.stack((i0, i1, i2), dim=-1)  # [B, 3]
+
+            triadic_redundancy = singletons.min(dim=-1).values
+            u0 = (i0 - torch.maximum(i1, i2)).clamp_min(0.0)
+            u1 = (i1 - torch.maximum(i0, i2)).clamp_min(0.0)
+            u2 = (i2 - torch.maximum(i0, i1)).clamp_min(0.0)
+            unique_expert = torch.stack((u0, u1, u2), dim=-1)
+
+            max_singleton = singletons.max(dim=-1).values
+            pairwise_redundancy = (max_singleton - triadic_redundancy - unique_expert.sum(dim=-1)).clamp_min(0.0)
+            shared_redundancy = triadic_redundancy + pairwise_redundancy
+            synergy = (i012 - max_singleton).clamp_min(0.0)
+            total_info = shared_redundancy + unique_expert.sum(dim=-1) + synergy
+            denom = total_info.clamp_min(1e-8)
+
+            norm_r = shared_redundancy / denom
+            norm_u = unique_expert / denom.unsqueeze(-1)
+            norm_s = synergy / denom
+            normalized_atoms = torch.cat((norm_r.unsqueeze(-1), norm_u, norm_s.unsqueeze(-1)), dim=-1)
+
+        return {
+            "target": chosen_target,
+            "redundancy": shared_redundancy,
+            "triadic_redundancy": triadic_redundancy,
+            "pairwise_redundancy": pairwise_redundancy,
+            "unique_expert": unique_expert,
+            "synergy": synergy,
+            "total_information": total_info,
+            "singleton_information": singletons,
+            "full_information": i012,
+            "normalized_atoms": normalized_atoms,
+        }
+
+    def causal_mediation(self, donors, query, context, target=None):
+        """Compute Natural Direct Effect (NDE_visual) and Natural Indirect Effect (NIE_shortcut).
+
+        Follows Pearl (2001) and Vig et al. (NeurIPS 2020, arXiv:2004.12265) to decompose
+        the total prediction margin and probability gain into:
+          - Visual Natural Direct Effect (NDE_visual): Effect transmitted strictly through
+            the visual specialist routing & task transformation pathway under neutral context.
+          - Shortcut Natural Indirect Effect (NIE_shortcut): Effect mediated through the
+            additive context proxy shortcut branch.
+          - Visual Dominance Ratio (rho_visual in [0, 1]): Fraction of pathway drive coming
+            from visual evidence vs. context shortcut.
+        """
+        _inputs(donors, query, context)
+        dtype = self.task_matrices.dtype
+        batch_size = donors.shape[0]
+        device = donors.device
+        p = donors.detach().to(dtype=dtype)
+        c_tensor = context.detach().to(dtype=dtype)
+        p_null = torch.full_like(p, 0.1)
+        c_null = torch.full_like(c_tensor, 0.1)
+
+        with torch.no_grad():
+            batched_p = torch.cat((p_null, p, p_null, p), dim=0)
+            batched_q = query.repeat(4, 1)
+            batched_c = torch.cat((c_null, c_null, c_tensor, c_tensor), dim=0)
+            out = self._compute(batched_p, batched_q, batched_c, detach_donors=True)
+            logits = out["logits"].view(4, batch_size, 10)
+            probs = logits.softmax(dim=-1)
+
+            if target is None:
+                chosen_target = logits[3].argmax(dim=-1)
+            else:
+                _target(target, "target", batch_size, device)
+                chosen_target = target
+
+            rows = torch.arange(batch_size, device=device)
+            target_logits = logits[:, rows, chosen_target]
+            masked = logits.clone()
+            masked[:, rows, chosen_target] = -1e9
+            runner_up_logits = masked.max(dim=-1).values
+            margins = target_logits - runner_up_logits  # [4, B]: 00, 10, 01, 11
+
+            nde_margin = margins[1] - margins[0]
+            nie_margin = margins[3] - margins[1]
+            te_margin = margins[3] - margins[0]
+            visual_dominance = nde_margin.abs() / (nde_margin.abs() + nie_margin.abs() + 1e-8)
+
+            target_probs = probs[:, rows, chosen_target]
+            nde_prob = target_probs[1] - target_probs[0]
+            nie_prob = target_probs[3] - target_probs[1]
+            te_prob = target_probs[3] - target_probs[0]
+
+        return {
+            "target": chosen_target,
+            "nde_margin": nde_margin,
+            "nie_margin": nie_margin,
+            "total_effect_margin": te_margin,
+            "visual_dominance": visual_dominance,
+            "nde_prob": nde_prob,
+            "nie_prob": nie_prob,
+            "total_effect_prob": te_prob,
+            "visual_only_prediction": logits[1].argmax(dim=-1),
+            "shortcut_only_prediction": logits[2].argmax(dim=-1),
+            "full_prediction": logits[3].argmax(dim=-1),
+        }
+
+    def critical_corruption_threshold(
+        self,
+        clean_donors,
+        query,
+        context,
+        corrupted_experts=(0, 1),
+        corrupted_class: int = 4,
+        stealth: bool = False,
+        target=None,
+    ):
+        """Find the exact critical corruption confidence alpha_crit in [0.10, 1.00] via batched grid + refinement.
+
+        Returns the lowest adversarial confidence on `corrupted_experts` at the queried source
+        where the receiver's top-1 prediction flips away from `target` (or 1.0 if immune up to 0.9999).
+        """
+        _inputs(clean_donors, query, context)
+        dtype = self.task_matrices.dtype
+        batch_size = clean_donors.shape[0]
+        device = clean_donors.device
+        p_clean = clean_donors.detach().to(dtype=dtype)
+        c_tensor = context.detach().to(dtype=dtype)
+
+        with torch.no_grad():
+            clean_logits = self._compute(p_clean, query, c_tensor, detach_donors=True)["logits"]
+            if target is None:
+                chosen_target = clean_logits.argmax(dim=-1)
+            else:
+                _target(target, "target", batch_size, device)
+                chosen_target = target
+
+            grid = torch.linspace(0.10, 0.9995, 37, device=device, dtype=dtype)
+            corrupted_cls = int(corrupted_class) % 10
+            decoy_cls = (corrupted_cls + 5) % 10
+
+            batch_views = []
+            for conf_val in grid:
+                c_f = float(conf_val)
+                if stealth:
+                    rem = max(0.0, 1.0 - c_f)
+                    base_tail = (rem * 0.12) / 8.0
+                    vec = torch.full((10,), base_tail, device=device, dtype=dtype)
+                    vec[corrupted_cls] = c_f
+                    vec[decoy_cls] = rem * 0.88
+                else:
+                    rem_each = max(0.0, (1.0 - c_f) / 9.0)
+                    vec = torch.full((10,), rem_each, device=device, dtype=dtype)
+                    vec[corrupted_cls] = c_f
+                view = p_clean.clone()
+                for b in range(batch_size):
+                    s_idx = int(query[b, 0])
+                    for e in corrupted_experts:
+                        if 0 <= int(e) < 3:
+                            view[b, s_idx, int(e)] = vec
+                batch_views.append(view)
+
+            stacked = torch.cat(batch_views, dim=0)
+            q_rep = query.repeat(len(grid), 1)
+            c_rep = c_tensor.repeat(len(grid), 1)
+            preds = self._compute(stacked, q_rep, c_rep, detach_donors=True)["logits"].argmax(dim=-1)
+            preds = preds.view(len(grid), batch_size)
+
+            alpha_crit = torch.ones(batch_size, device=device, dtype=dtype)
+            immune = torch.ones(batch_size, device=device, dtype=torch.bool)
+            for b in range(batch_size):
+                wrong_mask = preds[:, b] != chosen_target[b]
+                if wrong_mask.any():
+                    first_idx = int(wrong_mask.nonzero(as_tuple=False)[0].item())
+                    alpha_crit[b] = grid[first_idx]
+                    immune[b] = False
+
+        return {
+            "target": chosen_target,
+            "alpha_crit": alpha_crit,
+            "immune": immune,
+        }
+
     def forward(self, donors, query, context):
         return self.inspect(donors, query, context)["logits"]
 

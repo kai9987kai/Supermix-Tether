@@ -118,7 +118,7 @@ Success would require better useful behavior beyond identical-data IIT-style tra
 
 The experiment does not test arbitrary donor architectures, unseen datasets, writer-disjoint recognition, novel digit operations, recurrent reasoning or language-model integration. The receiver sees compact class posteriors rather than raw images or high-dimensional donor hidden states. Donor errors are correlated and corruption is synthetic. Full-bank common-mode failure can destroy task information, so invariance is not a promise that missing information can be recovered.
 
-Current scope does not include test-time training, parameter merging, policy reuse, continual learning, or a learned abstention policy (post-hoc split conformal RAPS prediction sets and epistemic-gated conformal risk control are implemented in `tether/conformal.py`). No claim is made about biological memory, consciousness, semantic understanding or real-world safety. General method novelty and superiority remain open questions.
+Current scope does not include test-time training, parameter merging, policy reuse, continual learning, or a learned abstention policy (post-hoc split conformal RAPS prediction sets, non-exchangeable/online adaptive conformal sets, likelihood-ratio weighted conformal prediction, epistemic-gated conformal risk control, Spectral-Mahalanobis sanitization, and Helmholtz free-energy tail forensics are implemented in `tether/conformal.py`, while Williams-Beer PID, causal mediation, and certified breakdown thresholds are implemented in `tether/model.py`). No claim is made about biological memory, consciousness, semantic understanding or real-world safety. General method novelty and superiority remain open questions.
 
 ## Data attribution and results status
 

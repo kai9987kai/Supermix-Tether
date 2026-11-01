@@ -64,6 +64,15 @@ Standard split conformal prediction assumes exchangeability between calibration 
 
 A white-box **Stealth Decoy-Spike Adversary (`stealth_1..3`)** that places $88\%$ of its non-argmax tail mass on a single decoy runner-up class and splits the remaining $12\%$ uniformly across the other 8 classes achieves low runner-up tail entropy $H(p_{-1})/\log 9 \approx 0.289$, yielding a high 1D trust score $\tau = 1 - 0.289 = 0.711 > 0.10$ and fooling 1D tail-entropy defenses. In v0.5, `fit_mahalanobis_forensics` fits class-conditional runner-up covariance $\Sigma_{e,c}$ and deep-tail spectral log-dispersion ($\text{std}(\log p_{(3..10)})$) on the frozen `seen_independent` validation split. Because synthetic flat or single-decoy spoofs have zero deep-tail dispersion ($\text{std}(\log p_{(3..10)}) = 0.0$) and violate class-conditional visual similarity covariance, `score_mahalanobis_forensics` flags both `corrupt_*` and `stealth_*` attacks ($D_M > 5.0$), and `sanitize_specialist_posteriors` replaces flagged specialists with the neutral uniform baseline $1/10$ before receiver inference.
 
+### Williams & Beer (2010), Vig et al. (2020), Tibshirani et al. (2019) & Liu et al. (2020): Multivariate PID, Causal Mediation, Weighted Conformal Prediction & Helmholtz Tail Energy (v0.6)
+
+- [Nonnegative Decomposition of Multivariate Information](https://arxiv.org/abs/1004.2515), 2010. Authors: Paul L. Williams and Randall D. Beer.
+- [Investigating Gender Bias in Language Models Using Causal Mediation Analysis](https://arxiv.org/abs/2004.12265), NeurIPS 2020. Authors: Jesse Vig, Sebastian Gehrmann, Yonatan Belinkov, Sharon Qian, Daniel Nevo, Yaron Singer and Stuart Shieber.
+- [Conformal Prediction Under Covariate Shift](https://arxiv.org/abs/1904.06019), NeurIPS 2019. Authors: Ryan J. Tibshirani, Rina Foygel Barber, Emmanuel J. Candès and Aaditya Ramdas.
+- [Energy-based Out-of-distribution Detection](https://arxiv.org/abs/2010.03759), NeurIPS 2020. Authors: Weitang Liu, Xiaoyun Wang, John D. Owens and Yixuan Li.
+
+In v0.6, `TetherReceiver.pid_decomposition` decomposes point-wise directed target information $I(S; y^*) = \max(0, \log(p^{(S)}_{y^*} / p^{(\emptyset)}_{y^*}))$ across the $2^3 = 8$ specialist coalitions into non-negative Shared Redundancy ($R_{\text{shared}}$), Unique Specialist Information ($U_0, U_1, U_2$), and Coalitional Circuit Synergy ($S_{\text{syn}}$). `TetherReceiver.causal_mediation` separates Visual Natural Direct Effect ($\text{NDE}_{\text{visual}}$) from Context Shortcut Natural Indirect Effect ($\text{NIE}_{\text{shortcut}}$) and computes the exact Critical Breakdown Threshold $\alpha^*_{\text{crit}}$. Finally, `weighted_conformal_prediction_sets` reweights calibration nonconformity scores by exponential conflict likelihood ratios $w(x) = \exp(\beta d_{\text{shift}}(x))$, and `helmholtz_free_energy_forensics` evaluates runner-up tail Helmholtz free energy $E_{\text{tail}}(P_{s,e}; T)$ and inverse participation ratio $N_{\text{eff}} \in [1, 9]$.
+
 ## Current context: useful lessons, different implemented mechanisms
 
 | Primary source and checked version | Source-level observation | Consequence for Tether |

@@ -15,14 +15,17 @@ from tether.conformal import (
     conformal_quantile,
     evaluate_conformal_sets,
     evaluate_nex_conformal_sets,
+    evaluate_weighted_conformal_sets,
     fit_mahalanobis_forensics,
     fit_temperature,
+    helmholtz_free_energy_forensics,
     nex_raps_prediction_sets,
     raps_nonconformity_scores,
     raps_prediction_sets,
     sanitize_specialist_posteriors,
     score_mahalanobis_forensics,
     softmax_temperature,
+    weighted_conformal_prediction_sets,
 )
 from tether.experiment import calibrate_study, inspect_example, live_arena, live_predict
 from tether.model import TetherReceiver
@@ -273,3 +276,54 @@ def test_adaptive_and_non_exchangeable_conformal_under_shift():
     assert iit_d2["nex_marginal_coverage"] > iit_d2["marginal_coverage"] + 0.08
     assert iit_d2["aci_marginal_coverage"] > iit_d2["marginal_coverage"] + 0.08
     assert iit_d2["aci_marginal_coverage"] >= 0.90
+    assert iit_d2["wcp_marginal_coverage"] > iit_d2["marginal_coverage"] + 0.08
+
+
+def test_williams_beer_pid_conservation_and_regime_shift():
+    study_path = Path("outputs/v2-confirmation")
+    if not (study_path / "summary.json").exists():
+        pytest.skip("outputs/v2-confirmation not present")
+
+    ex_clean = inspect_example(study_path, index=0, arm="tether", mode="factual", seed=101)
+    pid_clean = ex_clean["pid"]
+    assert pid_clean["conservation_error"] < 1e-5
+    assert pid_clean["redundancy"] >= 0.0
+    assert pid_clean["synergy"] >= 0.0
+    assert all(u >= 0.0 for u in pid_clean["unique"])
+    # On clean inputs where all 3 specialists agree, Shared Redundancy R dominates
+    assert pid_clean["normalized_shares"]["redundancy"] > 0.65
+
+    # Under 2-of-3 specialist corruption (damage_two), Shared Redundancy R drops to 0
+    # and the lone intact specialist's Unique Information U_intact dominates
+    ex_d2 = inspect_example(study_path, index=0, arm="tether", mode="damage_two", seed=101)
+    pid_d2 = ex_d2["pid"]
+    assert pid_d2["conservation_error"] < 1e-5
+    assert pid_d2["redundancy"] == pytest.approx(0.0, abs=1e-5)
+    assert max(pid_d2["normalized_shares"]["unique"]) > 0.80
+
+
+def test_causal_mediation_and_critical_breakdown_threshold():
+    study_path = Path("outputs/v2-confirmation")
+    if not (study_path / "summary.json").exists():
+        pytest.skip("outputs/v2-confirmation not present")
+
+    # Under adversarial context proxy cue + 2/3 corruption, Tether maintains high visual dominance
+    pred_tether = live_predict(
+        study_path, digit=3, source=0, operation=0,
+        tamper_mode="corrupt_2", corrupted_class=8, confidence=0.98,
+        seed=101, arm="tether", context_mode="adversarial",
+    )
+    assert pred_tether["prediction"] == 3
+    assert pred_tether["causal_mediation"]["visual_dominance_ratio"] > 0.80
+    assert pred_tether["critical_corruption_threshold"] > 0.95
+    assert 3 in pred_tether["wcp_conformal_set"]
+
+    # Helmholtz free-energy forensics separates flat-tail corrupted experts (N_eff ~ 9) from intact expert
+    pr = pred_tether["spectral_participation_ratio"]
+    dmg = set(pred_tether["damaged_experts"])
+    for e_idx in range(3):
+        if e_idx in dmg:
+            assert pr[e_idx] > 8.5
+        else:
+            assert pr[e_idx] < 8.5
+
