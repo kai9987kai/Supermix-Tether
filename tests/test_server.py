@@ -165,5 +165,22 @@ def test_live_predict_endpoints():
         post_payload = json.loads(body)
         assert post_payload["abstain"] is True
         assert post_payload["selective_prediction"] == -1
+        assert post_payload["conformal_set"] == []
+
+        # Live 7-arm arena endpoint with stealth attack & Mahalanobis defense
+        arena_data = json.dumps({"digit": 7, "tamper_mode": "stealth_2", "corrupted_class": 2, "defense": True}).encode("utf-8")
+        status, _, body = request(port, "/api/live_arena", method="POST", body=arena_data, headers={"Content-Type": "application/json"})
+        assert status == 200
+        arena_payload = json.loads(body)
+        assert len(arena_payload["arms"]) == 7
+        assert arena_payload["defense"] is True
+        assert "sweep" in arena_payload
+
+        # Conformal calibration endpoint
+        status, _, body = request(port, "/api/conformal?alpha=0.05&seed=101")
+        assert status == 200
+        conf_payload = json.loads(body)
+        assert conf_payload["schema"] == "supermix-tether-conformal-v1"
+        assert "tether" in conf_payload["summary_by_arm"]
 
 

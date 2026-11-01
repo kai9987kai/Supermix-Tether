@@ -33,6 +33,10 @@ def main(argv=None):
     export.add_argument("checkpoint", type=Path, help="path to a .pt checkpoint file")
     export.add_argument("--output", type=Path, default=Path("exports"), help="output directory for ONNX models")
     export.add_argument("--opset", type=int, default=14, help="ONNX opset version")
+    calibrate = sub.add_parser("calibrate", help="evaluate split conformal RAPS sets and temperature calibration")
+    calibrate.add_argument("study", type=Path, help="path to a completed study directory")
+    calibrate.add_argument("--alpha", type=float, default=0.05, help="miscoverage rate alpha in (0, 1)")
+    calibrate.add_argument("--seed", type=int, default=None, help="optional seed filter")
     args = parser.parse_args(argv)
     if args.command == "study":
         from .experiment import StudyConfig, run_study
@@ -53,6 +57,9 @@ def main(argv=None):
         from .export import export_checkpoint
         manifest = export_checkpoint(args.checkpoint, args.output, opset_version=args.opset)
         print(json.dumps(manifest, indent=2))
+    elif args.command == "calibrate":
+        from .experiment import calibrate_study
+        print(json.dumps(calibrate_study(args.study, alpha=args.alpha, seed=args.seed), indent=2))
 
 
 if __name__ == "__main__":

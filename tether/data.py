@@ -254,11 +254,12 @@ class DonorBank(nn.Module):
             ])
 
     def forward(self, images: Tensor) -> Tensor:
-        if (not isinstance(images, Tensor) or images.layout != torch.strided
-                or images.device.type != "cpu" or images.dtype != torch.float32
-                or images.ndim != 2 or images.shape[1] != 64 or images.shape[0] < 1
-                or not torch.isfinite(images).all()):
-            raise ValueError("images must be a finite float32 CPU tensor [positive batch,64]")
+        if not torch.jit.is_tracing():
+            if (not isinstance(images, Tensor) or images.layout != torch.strided
+                    or images.device.type != "cpu" or images.dtype != torch.float32
+                    or images.ndim != 2 or images.shape[1] != 64 or images.shape[0] < 1
+                    or not torch.isfinite(images).all()):
+                raise ValueError("images must be a finite float32 CPU tensor [positive batch,64]")
         return torch.stack([expert(images) for expert in self.experts], dim=1)
 
 

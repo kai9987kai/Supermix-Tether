@@ -16,19 +16,20 @@
       <a class="nav-item active" href="#overview"><span>◈</span> Study overview</a>
       <a class="nav-item" href="#inspector"><span>⊞</span> Intervention lab</a>
       <a class="nav-item" href="#playground"><span>⚡</span> Live playground</a>
+      <a class="nav-item" href="#arena"><span>⚔</span> Live 7-arm arena</a>
       <a class="nav-item" href="#comparisons"><span>≋</span> Arm comparisons</a>
       <a class="nav-item" href="#protocol"><span>⌘</span> Method & provenance</a>
     </nav>
-    <div class="sidebar-note"><span class="status-dot"></span> Runs on this computer<p>Saved study · CPU inference<br>No browser training</p></div>
-    <div class="sidebar-footer">SUPERMIX RESEARCH <span id="protocol-version">v0.3</span></div>
+    <div class="sidebar-note"><span class="status-dot"></span> Runs on this computer<p>Saved study · CPU inference<br>Conformal + Shapley + Forensics</p></div>
+    <div class="sidebar-footer">SUPERMIX RESEARCH <span id="protocol-version">v0.5</span></div>
   </aside>
 
   <div class="workspace">
-    <header class="topbar"><div><span class="breadcrumb">Laboratories</span><span class="slash">/</span><strong>Specialist use</strong></div><a class="quiet-link" href="/api/results" target="_blank" rel="noopener">Study JSON <span>↗</span></a></header>
+    <header class="topbar"><div><span class="breadcrumb">Laboratories</span><span class="slash">/</span><strong>Specialist use &amp; conformal forensics</strong></div><div class="topbar-links"><a class="quiet-link" href="/api/conformal" target="_blank" rel="noopener">Conformal JSON <span>↗</span></a><a class="quiet-link" href="/api/results" target="_blank" rel="noopener">Study JSON <span>↗</span></a></div></header>
     <main>
       <section id="overview" class="intro">
-        <div class="eyebrow"><span class="status-dot"></span> CAUSAL-USE EXPERIMENT <span class="version-pill">CPU LOCAL</span></div>
-        <div class="title-row"><div><h1>Do specialists change<br>the answer?</h1><p class="lead">Trace what a receiver uses, what it ignores, and what survives a change in context.</p></div><div class="study-state"><span id="study-status" class="pill">Loading saved study</span><p id="study-config">Reading local evidence…</p></div></div>
+        <div class="eyebrow"><span class="status-dot"></span> CAUSAL-USE &amp; CONFORMAL FORENSICS EXPERIMENT <span class="version-pill">CPU LOCAL · v0.5</span></div>
+        <div class="title-row"><div><h1>Do specialists change<br>the answer?</h1><p class="lead">Trace what a receiver uses, isolate majority corruption via dark-knowledge forensics, and bound uncertainty with split conformal prediction sets and causal circuit patching.</p></div><div class="study-state"><span id="study-status" class="pill">Loading saved study</span><p id="study-config">Reading local evidence…</p></div></div>
         <div id="study-error" class="notice hidden" role="status"></div>
         <div class="stat-grid">
           <article class="stat"><span class="stat-label">Selected condition <span>01</span></span><strong id="condition-name">—</strong><p id="condition-caption">Choose a condition in arm comparisons</p></article>
@@ -39,17 +40,17 @@
       </section>
 
       <section class="architecture card" aria-label="Model architecture">
-        <div class="section-caption"><span>THE EXPERIMENT, AT A GLANCE</span><span class="muted">Frozen knowledge → learned use</span></div>
+        <div class="section-caption"><span>THE EXPERIMENT, AT A GLANCE</span><span class="muted">Frozen knowledge → forensic trust → conformal sets</span></div>
         <div class="architecture-flow">
           <div class="flow-node"><div class="mini-sources"><i></i><i></i><i></i></div><strong>3 source images</strong><small>8 × 8 handwritten digits</small></div><span class="flow-arrow">→</span>
           <div class="flow-node"><div class="expert-symbol"><span>A</span><span>B</span><span>C</span></div><strong>Frozen specialists</strong><small>3 heterogeneous classifiers</small></div><span class="flow-arrow">→</span>
-          <div class="flow-node receiver-node"><svg viewBox="0 0 80 30" aria-hidden="true"><path d="M4 5L37 15 4 25M37 15L73 5M37 15L73 25"/><circle cx="37" cy="15" r="5"/></svg><strong>Learned receiver</strong><small>Source routing + expert weighting</small></div><span class="flow-arrow">→</span>
-          <div class="flow-node"><div class="answer-symbol">ŷ</div><strong>Task answer</strong><small>Relevant effect + nuisance invariance</small></div>
+          <div class="flow-node receiver-node"><svg viewBox="0 0 80 30" aria-hidden="true"><path d="M4 5L37 15 4 25M37 15L73 5M37 15L73 25"/><circle cx="37" cy="15" r="5"/></svg><strong>Learned receiver</strong><small>Forensic routing + causal patching</small></div><span class="flow-arrow">→</span>
+          <div class="flow-node"><div class="answer-symbol">C<sub>1−α</sub></div><strong>Conformal answer</strong><small>RAPS set + epistemic abstention</small></div>
         </div>
       </section>
 
       <section id="inspector">
-        <div class="section-heading"><div><span class="eyebrow">01 / INTERVENTION LAB</span><h2>Look inside a decision</h2><p>Change one input pathway and inspect the saved receiver.</p></div><div class="live-label"><span class="status-dot"></span> Checkpoint inference</div></div>
+        <div class="section-heading"><div><span class="eyebrow">01 / INTERVENTION LAB</span><h2>Look inside a decision</h2><p>Change one input pathway and inspect conformal sets, axiomatic integrated gradients, and circuit patching.</p></div><div class="live-label"><span class="status-dot"></span> Checkpoint inference</div></div>
         <div class="inspector-layout">
           <article class="card inspection-card">
             <div class="control-row"><label>Receiver<select id="arm-select"><option value="tether">Tether · dual objective</option><option value="iit">IIT · identical-data control</option><option value="unpaired">Unpaired · marginal-loss control</option><option value="passive">Passive</option><option value="dropout">Donor dropout</option><option value="effect_only">Effect only</option><option value="invariance_only">Invariance only</option></select></label><label>Seed<select id="seed-select"><option value="">Default</option></select></label><label class="example-label">Saved example<div class="stepper"><button id="previous-example" aria-label="Previous example">−</button><input id="example-index" type="number" min="0" max="1000000" value="0" aria-label="Example index"><button id="next-example" aria-label="Next example">+</button></div></label></div>
@@ -60,6 +61,8 @@
               <div class="source-tile"><div class="source-title">Source 2 <span>—</span></div><canvas width="128" height="128" aria-label="Source 2 digit"></canvas><div class="weight-track"><i></i></div><small>Source weight <b>—</b></small></div>
               <div class="source-tile"><div class="source-title">Source 3 <span>—</span></div><canvas width="128" height="128" aria-label="Source 3 digit"></canvas><div class="weight-track"><i></i></div><small>Source weight <b>—</b></small></div>
             </div>
+            <div class="expert-heading"><span>Causal Circuit Patching (Interchange Intervention → Clean Target)</span><span>Restoration</span></div>
+            <div id="inspector-patching" class="saliency-bars"></div>
             <div class="inspection-foot"><p id="mode-description">Unmodified donor outputs and context from a frozen test task.</p><span id="example-status" class="muted">Waiting for saved checkpoint</span></div>
             <div id="example-error" class="notice hidden" role="status"></div>
           </article>
@@ -68,7 +71,14 @@
             <div class="answer-row"><div><span class="small-label">PREDICTED DIGIT</span><strong id="prediction">—</strong></div><div class="target-box"><span class="small-label">TASK TARGET</span><strong id="target">—</strong></div></div>
             <div id="inspector-abstain-banner" class="abstain-banner hidden">
               <strong>SAFE ABSTENTION TRIGGERED</strong>
-              <p>Epistemic Trust fell below threshold (&tau; &lt; 0.10). Model rejected 3/3 common-mode specialist destruction.</p>
+              <p>Epistemic Trust fell below threshold (&tau; &lt; 0.10). Conformal set collapsed to &empty; on 3/3 common-mode destruction.</p>
+            </div>
+            <div class="conformal-box">
+              <div class="conformal-header">
+                <span class="small-label">CONFORMAL SET C<sub>0.95</sub>(x) (RAPS)</span>
+                <span id="inspector-conformal-meta" class="muted">T* = — · q̂ = —</span>
+              </div>
+              <div id="inspector-conformal-set" class="conformal-chips"></div>
             </div>
             <div class="expert-heading"><span>Epistemic Trust (&tau;) &amp; Safe Gating</span><span id="inspector-trust-val">—</span></div>
             <div class="trust-meter-row">
@@ -79,16 +89,18 @@
             <div id="probabilities" class="probabilities" aria-label="Digit class probabilities"></div>
             <div class="expert-heading"><span>Expert weighting</span><span>A / B / C</span></div><div id="expert-weights" class="expert-weights"></div>
             <div class="expert-heading"><span>Queried-source dark-knowledge trust</span><span id="damaged-badge">1 − tail entropy</span></div><div id="trust-scores" class="trust-pills"></div>
-            <div class="expert-heading"><span>Causal Saliency (Input &times; Grad)</span><span>A / B / C</span></div>
+            <div class="expert-heading"><span>Axiomatic Integrated Gradients (IG)</span><span id="inspector-ig-err">Completeness Δ = —</span></div>
             <div id="inspector-saliency" class="saliency-bars"></div>
-            <p class="fine-print">Weights describe this computation. Intervention comparisons test whether those pathways affect the answer.</p>
+            <div class="expert-heading"><span>Cooperative Shapley Values (&phi;<sub>e</sub>) &amp; Coalitions</span><span id="inspector-shapley-err">Efficiency Δ = 0</span></div>
+            <div id="inspector-shapley" class="saliency-bars"></div>
+            <p class="fine-print">IG integrates gradients along the simplex; Shapley values &phi;<sub>e</sub> compute exact payoffs across all 2&sup3; = 8 specialist coalitions.</p>
           </article>
         </div>
       </section>
 
       <section id="playground">
         <div class="section-heading">
-          <div><span class="eyebrow">02 / INTERACTIVE PLAYGROUND &amp; ADVERSARIAL TAMPER SIMULATOR</span><h2>Draw, Tamper, and Test Safe Abstention</h2><p>Draw any handwritten digit on the 8&times;8 matrix or load presets, then inject adversarial tampering across specialists to verify causal tethering and dark-knowledge abstention.</p></div>
+          <div><span class="eyebrow">02 / INTERACTIVE PLAYGROUND &amp; ADVERSARIAL TAMPER SIMULATOR</span><h2>Draw, Tamper, and Test Conformal &amp; Epistemic Forensics</h2><p>Paint on the 8&times;8 canvas or load digit presets, inject adversarial specialist corruption, and watch tri-part uncertainty decomposition, RAPS conformal sets, and circuit patching respond in real time.</p></div>
           <div class="live-label"><span class="status-dot"></span> Real-time CPU inference</div>
         </div>
         <div class="inspector-layout">
@@ -98,8 +110,9 @@
                 <div class="canvas-header">
                   <strong>8 &times; 8 Canvas</strong>
                   <div class="canvas-actions">
-                    <button id="pg-clear" class="btn-sm">Clear</button>
+                    <button id="pg-noise" class="btn-sm" title="Add sensor noise to canvas">+Noise</button>
                     <button id="pg-invert" class="btn-sm">Invert</button>
+                    <button id="pg-clear" class="btn-sm">Clear</button>
                   </div>
                 </div>
                 <div class="canvas-wrap">
@@ -152,13 +165,16 @@
                 <div class="tamper-box">
                   <div class="tamper-title">
                     <span class="small-label">ADVERSARIAL TAMPER INJECTION</span>
+                    <label class="defense-toggle"><input type="checkbox" id="pg-defense"> Mahalanobis Sanitizer</label>
                     <span id="pg-tamper-tag" class="tag">CLEAN</span>
                   </div>
                   <div class="tamper-tabs" role="group">
                     <button class="tamper-btn selected" data-tamper="clean">Clean (Intact)</button>
-                    <button class="tamper-btn" data-tamper="corrupt_1">Corrupt 1 Expert</button>
-                    <button class="tamper-btn" data-tamper="corrupt_2">Corrupt 2 Experts</button>
-                    <button class="tamper-btn" data-tamper="corrupt_3">Common-Mode (3/3)</button>
+                    <button class="tamper-btn" data-tamper="corrupt_1">Corrupt 1/3</button>
+                    <button class="tamper-btn" data-tamper="corrupt_2">Corrupt 2/3</button>
+                    <button class="tamper-btn" data-tamper="corrupt_3">Common (3/3)</button>
+                    <button class="tamper-btn" data-tamper="stealth_2" title="Mimics runner-up tail entropy to evade 1D trust">Stealth 2/3</button>
+                    <button class="tamper-btn" data-tamper="stealth_3" title="3/3 Stealth tail-mimicry attack">Stealth 3/3</button>
                   </div>
                   <div class="tamper-params">
                     <label>Tamper Target Class
@@ -181,12 +197,25 @@
                         <span id="pg-conf-val">99.0%</span>
                       </div>
                     </label>
+                    <label>Conformal Target Coverage (1 &minus; &alpha;)
+                      <div class="slider-row">
+                        <input id="pg-coverage" type="range" min="0.80" max="0.99" step="0.01" value="0.95">
+                        <span id="pg-cov-val">95%</span>
+                      </div>
+                    </label>
                   </div>
+                </div>
+                <div class="uncertainty-box">
+                  <div class="expert-heading" style="margin-top:0">
+                    <span>Tri-Part Information-Theoretic Uncertainty Decomposition</span>
+                    <span id="pg-unc-summary" class="muted">Queried Source</span>
+                  </div>
+                  <div id="pg-uncertainty-bars" class="saliency-bars"></div>
                 </div>
               </div>
             </div>
             <div class="inspection-foot">
-              <p id="pg-caption">Interactive testing: paint on the canvas or pick a preset, then test how Tether rejects corrupted specialists.</p>
+              <p id="pg-caption">Notice: under 3/3 Common-Mode spoofing, standard Specialist Conflict (JSD) drops to 0.0% because all corrupted experts agree — only Forensic Spoof Risk (1 &minus; &tau; = 100%) detects the attack!</p>
               <span id="pg-status" class="muted">Live ready</span>
             </div>
             <div id="pg-error" class="notice hidden" role="status"></div>
@@ -208,7 +237,14 @@
             </div>
             <div id="pg-abstain-banner" class="abstain-banner hidden">
               <strong>SAFE ABSTENTION TRIGGERED</strong>
-              <p>Epistemic Trust fell below threshold (&tau; &lt; 0.10). Model refused to guess blindly on spoofed specialists.</p>
+              <p>Epistemic Trust fell below threshold (&tau; &lt; 0.10). Conformal set gated to &empty; to prevent spoofed hallucination.</p>
+            </div>
+            <div class="conformal-box">
+              <div class="conformal-header">
+                <span class="small-label" id="pg-conformal-label">SPLIT CONFORMAL SET C<sub>0.95</sub>(x)</span>
+                <span id="pg-conformal-meta" class="muted">T* = — · q̂ = —</span>
+              </div>
+              <div id="pg-conformal-set" class="conformal-chips"></div>
             </div>
             <div class="expert-heading">
               <span>Epistemic Trust Metric (&tau;)</span>
@@ -227,12 +263,17 @@
             </div>
             <div id="pg-probabilities" class="probabilities" aria-label="Digit class probabilities"></div>
             <div class="expert-heading">
-              <span>Causal Attribution (Input &times; Gradient Saliency)</span>
-              <span>A / B / C</span>
+              <span>Axiomatic Integrated Gradients (IG)</span>
+              <span id="pg-ig-err">A / B / C</span>
             </div>
             <div id="pg-saliency-breakdown" class="saliency-bars"></div>
             <div class="expert-heading">
-              <span>Queried Specialist Trust Scores</span>
+              <span>Cooperative Specialist Shapley (&phi;<sub>e</sub>) &amp; Synergy</span>
+              <span id="pg-shapley-meta">2&sup3; = 8 Coalitions</span>
+            </div>
+            <div id="pg-shapley-breakdown" class="saliency-bars"></div>
+            <div class="expert-heading">
+              <span>Queried Specialist Trust, Mahalanobis D<sub>M</sub> &amp; Weights</span>
               <span id="pg-damaged-notice">3 Intact</span>
             </div>
             <div id="pg-trust-pills" class="trust-pills"></div>
@@ -240,19 +281,68 @@
         </div>
       </section>
 
+      <section id="arena">
+        <div class="section-heading">
+          <div><span class="eyebrow">03 / LIVE MULTI-ARM COUNTERFACTUAL ARENA &amp; PHASE-TRANSITION SWEEPER</span><h2>All 7 Receiver Arms vs. Your Live Tamper Attack</h2><p>Synchronized with the 8&times;8 playground canvas above: compare how all seven trained receiver objectives behave simultaneously on the exact same live input and adversarial specialist corruption.</p></div>
+          <div class="live-label"><span class="status-dot"></span> Simultaneous 7-arm inference</div>
+        </div>
+        <div class="comparison-layout">
+          <article class="card arm-card">
+            <div class="card-heading">
+              <h3>7-Arm Live Head-to-Head Matrix</h3>
+              <span id="arena-target-badge" class="tag">CLEAN TARGET: 3</span>
+            </div>
+            <div tabindex="0" role="region" aria-labelledby="arena-table-caption" class="table-wrapper">
+              <table class="arena-table">
+                <caption id="arena-table-caption" class="sr-only">Live comparison of all seven receiver arms on the current input and tamper mode</caption>
+                <thead>
+                  <tr>
+                    <th scope="col">Receiver Arm</th>
+                    <th scope="col">Selective Pred</th>
+                    <th scope="col">Conformal Set C(x)</th>
+                    <th scope="col">Target Prob</th>
+                    <th scope="col">Intact Wt</th>
+                    <th scope="col">Status</th>
+                  </tr>
+                </thead>
+                <tbody id="arena-tbody">
+                  <tr><th scope="row">Tether</th><td colspan="5">Loading live arena…</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <p class="fine-print">Intact Wt measures the share of reliability weight assigned to uncorrupted specialists on the queried source. Under 2/3 corruption, Tether isolates the lone intact specialist (&gt;98% weight).</p>
+          </article>
+          <article class="card contrast-card">
+            <div class="card-heading">
+              <h3>Adversarial Phase-Transition Curve</h3>
+              <span id="arena-sweep-tag" class="tag">CORRUPT 2 SWEEP</span>
+            </div>
+            <p class="muted">Target-class probability as adversarial specialist confidence sweeps from 55% to 99.1% on the current digit.</p>
+            <div class="sweep-chart-wrap">
+              <svg id="arena-sweep-svg" viewBox="0 0 380 210" aria-label="Adversarial robustness phase-transition curve"></svg>
+            </div>
+            <div class="chart-note">
+              <span class="swatch" style="background:#7358cf"></span> Tether
+              <span class="swatch baseline" style="background:#578776"></span> IIT
+              <span class="swatch" style="background:#ce874a;margin-left:7px"></span> Unpaired
+              <span class="swatch" style="background:#95a5a6;margin-left:7px"></span> Passive
+            </div>
+          </article>
+        </div>
+      </section>
+
       <section id="comparisons">
-        <div class="section-heading"><div><span class="eyebrow">03 / MATCHED COMPARISONS</span><h2>Same data. Different objectives.</h2><p>Seven receiver arms share architecture, initialization and four training views.</p></div><div class="comparison-controls"><label class="condition-control">Evaluation condition<select id="condition-select" disabled><option>Loading…</option></select></label><label class="condition-control">Metric<select id="metric-select"><option value="accuracy">Accuracy</option><option value="correct_pair_rate">Correct pair rate</option><option value="damaged_accuracy">Damaged accuracy</option><option value="donor_erasure_gap">Donor-erasure gap</option><option value="irrelevant_consistency">Irrelevant consistency</option><option value="effect_error">Effect error (L2)</option><option value="invariance_error">Invariance error (L2)</option></select></label></div></div>
+        <div class="section-heading"><div><span class="eyebrow">04 / MATCHED COMPARISONS</span><h2>Same data. Different objectives.</h2><p>Seven receiver arms share architecture, initialization and four training views.</p></div><div class="comparison-controls"><label class="condition-control">Evaluation condition<select id="condition-select" disabled><option>Loading…</option></select></label><label class="condition-control">Metric<select id="metric-select"><option value="accuracy">Accuracy</option><option value="correct_pair_rate">Correct pair rate</option><option value="damaged_accuracy">Damaged accuracy</option><option value="donor_erasure_gap">Donor-erasure gap</option><option value="irrelevant_consistency">Irrelevant consistency</option><option value="effect_error">Effect error (L2)</option><option value="invariance_error">Invariance error (L2)</option></select></label></div></div>
         <div class="comparison-layout"><article class="card arm-card"><div class="card-heading"><h3 id="arm-chart-title">Accuracy by receiver</h3><span id="arm-chart-subtitle" class="muted">Seed means · 0–100%</span></div><div id="arm-bars" class="arm-bars"><p class="empty-state">Completed study results will appear here.</p></div><div class="chart-note"><span class="swatch"></span> Tether <span class="swatch baseline"></span> Identical-data IIT <span class="muted">Other arms are controls and ablations.</span></div></article>
         <article class="card contrast-card"><div class="card-heading"><h3>Paired evidence</h3><span class="tag">DESCRIPTIVE</span></div><p class="muted">Differences use seed-level pairs. Intervals describe this study; they are not safety certificates.</p><div id="paired-results" class="paired-results"><p class="empty-state">No recorded comparisons yet.</p></div></article></div>
       </section>
 
       <section id="protocol" class="protocol-layout">
-        <article class="card"><span class="eyebrow">04 / RESEARCH BOUNDARY</span><h3>Measure useful dependence.</h3><p>Tether combines relevant intervention-effect matching with invariance to irrelevant and damaged-expert changes. The primary comparison is identical-data interchange-intervention training (IIT).</p><div class="protocol-grid"><div><strong>Real images, small domain</strong><p>1,797 sklearn digits. Image identities split before task generation. This is a within-dataset split.</p></div><div><strong>Controlled challenges</strong><p>Withheld source × operation pairs, proxy-cue shifts, donor erasure and synthetic expert corruption.</p></div></div><p class="fine-print">This is a bounded experimental model. Accuracy, routing weights and checksums do not establish semantic understanding, general intelligence or real-world safety.</p></article>
-        <article class="card provenance-card"><span class="eyebrow">05 / SAVED EVIDENCE</span><h3>Provenance & decision</h3><dl id="provenance"><dt>Study</dt><dd>Awaiting saved results</dd></dl><details><summary>Recorded decision</summary><pre id="decision-detail">No decision loaded.</pre></details></article>
+        <article class="card"><span class="eyebrow">05 / RESEARCH BOUNDARY</span><h3>Measure useful dependence.</h3><p>Tether combines relevant intervention-effect matching with invariance to irrelevant and damaged-expert changes, augmented in v0.4 with Split Conformal Prediction (RAPS), Axiomatic Integrated Gradients, and Causal Interchange Patching.</p><div class="protocol-grid"><div><strong>Real images, small domain</strong><p>1,797 sklearn digits. Image identities split before task generation. Conformal calibration uses the validation split only.</p></div><div><strong>Controlled challenges</strong><p>Withheld source × operation pairs, proxy-cue shifts, donor erasure and 1/3, 2/3, and 3/3 specialist corruption.</p></div></div><p class="fine-print">This is a bounded experimental model. Accuracy, routing weights, conformal sets and checksums do not establish semantic understanding, general intelligence or real-world safety.</p></article>
+        <article class="card provenance-card"><span class="eyebrow">06 / SAVED EVIDENCE</span><h3>Provenance &amp; decision</h3><dl id="provenance"><dt>Study</dt><dd>Awaiting saved results</dd></dl><details><summary>Recorded decision</summary><pre id="decision-detail">No decision loaded.</pre></details></article>
       </section>
       <footer>SUPERMIX TETHER <span>Small models. Inspectable interventions. Evidence before claims.</span><a href="#overview">Back to top ↑</a></footer>
     </main>
   </div>
 </body>
 </html>
-

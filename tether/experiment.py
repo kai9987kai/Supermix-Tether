@@ -19,9 +19,28 @@ import torch
 from torch.nn import functional as F
 
 from . import __version__
+from .conformal import (
+    adaptive_conformal_inference,
+    calibration_metrics,
+    conformal_quantile,
+    evaluate_conformal_sets,
+    evaluate_nex_conformal_sets,
+    fit_mahalanobis_forensics,
+    fit_temperature,
+    nex_raps_prediction_sets,
+    raps_nonconformity_scores,
+    raps_prediction_sets,
+    sanitize_specialist_posteriors,
+    score_mahalanobis_forensics,
+    softmax_temperature,
+)
 from .data import DonorBank, fit_donors, load_digits_split, make_batch
 from .model import TetherReceiver, objective
 from .receipts import atomic_json, metrics_from_trace, paired_comparisons, safe_artifact, seal_files, sha256, verify_files
+
+_CALIBRATION_CACHE: dict[tuple, dict] = {}
+_MAHALANOBIS_CACHE: dict[tuple, dict] = {}
+_RESTORE_CACHE: dict[tuple, tuple] = {}
 
 
 ARMS = ("passive", "dropout", "iit", "effect_only", "invariance_only", "unpaired", "tether")
@@ -379,8 +398,78 @@ def replay_study(study_dir: Path, strict: bool = False) -> dict:
         torch.set_num_threads(previous_threads)
 
 
+def _mahalanobis_cached(study_dir: Path, seed: int, split: dict, posteriors: torch.Tensor) -> dict:
+    key = (str(study_dir.resolve()), int(seed))
+    if key in _MAHALANOBIS_CACHE:
+        return _MAHALANOBIS_CACHE[key]
+    val_post = posteriors[split["validation"]].detach().cpu().numpy()
+    det = fit_mahalanobis_forensics(val_post)
+    if len(_MAHALANOBIS_CACHE) < 64:
+        _MAHALANOBIS_CACHE[key] = det
+    return det
+
+
+def _apply_tamper_tensor(clean_posteriors: torch.Tensor, source: int,
+                         tamper_mode: str, corrupted_class: int,
+                         confidence: float) -> tuple[torch.Tensor, list[int]]:
+    """Construct flat-tail (`corrupt_*`) or dark-knowledge-mimicking (`stealth_*`) specialist corruption."""
+    p = clean_posteriors.clone()
+    dmg: list[int] = []
+    c_val = max(0.5, min(0.999, float(confidence)))
+    c_idx = int(corrupted_class) % 10
+    if tamper_mode in ("corrupt_1", "corrupt_2", "corrupt_3"):
+        cnt = 1 if tamper_mode == "corrupt_1" else (2 if tamper_mode == "corrupt_2" else 3)
+        dmg = list(range(cnt))
+        other_p = (1.0 - c_val) / 9.0
+        c_vec = torch.full((10,), other_p, dtype=torch.float32)
+        c_vec[c_idx] = c_val
+        for e in dmg:
+            p[0, source, e] = c_vec
+    elif tamper_mode in ("stealth_1", "stealth_2", "stealth_3"):
+        cnt = 1 if tamper_mode == "stealth_1" else (2 if tamper_mode == "stealth_2" else 3)
+        dmg = list(range(cnt))
+        rem = 1.0 - c_val
+        decoy = (c_idx + 5) % 10
+        base_other = (rem * 0.12) / 8.0
+        c_vec = torch.full((10,), base_other, dtype=torch.float32)
+        c_vec[decoy] = rem * 0.88
+        c_vec[c_idx] = c_val
+        for e in dmg:
+            p[0, source, e] = c_vec
+    return p, dmg
+
+
+def _calibrate_cached(study_dir: Path, row: dict, config: StudyConfig,
+                      model: TetherReceiver, split: dict, posteriors: torch.Tensor) -> dict:
+    key = (str(study_dir.resolve()), row["seed"], row["arm"], row.get("checkpoint_sha256", ""))
+    if key in _CALIBRATION_CACHE:
+        return _CALIBRATION_CACHE[key]
+    val_batch = _batch(posteriors, split, config, row["seed"], "seen_independent", validation=True)
+    with torch.no_grad():
+        val_detail = model.inspect(val_batch["donors"], val_batch["query"], val_batch["context"])
+        val_logits = val_detail["logits"].cpu().numpy()
+        val_conflict = val_detail["queried_conflict_jsd"].cpu().numpy()
+    val_targets = val_batch["target"].cpu().numpy()
+    temp_fit = fit_temperature(val_logits, val_targets)
+    t_star = temp_fit["temperature"]
+    val_probs = softmax_temperature(val_logits, temperature=t_star)
+    val_scores = raps_nonconformity_scores(val_probs, val_targets, k_reg=1, lam_reg=0.02)
+    val_conflict_q95 = float(np.quantile(val_conflict, 0.95))
+    entry = {
+        "temperature": t_star,
+        "val_scores": val_scores,
+        "val_conflict_q95": val_conflict_q95,
+        "pre_scaling": temp_fit["pre_scaling"],
+        "post_scaling": temp_fit["post_scaling"],
+    }
+    if len(_CALIBRATION_CACHE) < 256:
+        _CALIBRATION_CACHE[key] = entry
+    return entry
+
+
 def inspect_example(study_dir: Path, index: int = 0, arm: str = "tether",
-                    mode: str = "factual", seed: int | None = None) -> dict:
+                    mode: str = "factual", seed: int | None = None,
+                    alpha: float = 0.05) -> dict:
     study_dir = Path(study_dir).resolve()
     modes = ("factual", "relevant", "irrelevant", "damaged", "damage_two", "damage_common", "erased", "context_shift")
     summary = json.loads((study_dir / "summary.json").read_text(encoding="utf-8"))
@@ -389,12 +478,18 @@ def inspect_example(study_dir: Path, index: int = 0, arm: str = "tether",
         raise ValueError("invalid example index, arm or mode")
     if seed is not None and (type(seed) is not int or seed not in config.seeds):
         raise ValueError("invalid study seed")
+    if not isinstance(alpha, (int, float)) or isinstance(alpha, bool) or not 0.0 < alpha < 1.0:
+        raise ValueError("alpha must lie in (0, 1)")
     row = next(r for r in summary["rows"] if r["arm"] == arm and (seed is None or r["seed"] == seed))
     previous_threads = torch.get_num_threads()
     torch.set_num_threads(config.threads)
     try:
         model, split, posteriors, _ = _restore(study_dir, row, config)
+        cal = _calibrate_cached(study_dir, row, config, model, split, posteriors)
+        q_hat = conformal_quantile(cal["val_scores"], alpha=float(alpha))
         batch = _batch(posteriors, split, config, row["seed"], "heldout_independent")
+        clean_donors = batch["donors"][index:index + 1].clone()
+        clean_context = batch["context"][index:index + 1].clone()
         donors = batch["donors"].clone()
         image_ids = batch["image_ids"].clone()
         target = batch["target"]
@@ -421,23 +516,80 @@ def inspect_example(study_dir: Path, index: int = 0, arm: str = "tether",
             donors.fill_(.1)
         elif mode == "context_shift":
             context = F.one_hot((batch["target"] + 1) % 10, 10).float()
+
+        q_slice = batch["query"][index:index + 1]
+        d_slice = donors[index:index + 1]
+        c_slice = context[index:index + 1]
         with torch.no_grad():
-            detail = model.inspect(donors[index:index + 1], batch["query"][index:index + 1], context[index:index + 1])
+            detail = model.inspect(d_slice, q_slice, c_slice)
+            logits_np = detail["logits"].cpu().numpy()
             probabilities = detail["logits"].softmax(-1)[0].tolist()
-        attribution = model.attribute(donors[index:index + 1], batch["query"][index:index + 1], context[index:index + 1])
+            patching = model.interchange_intervention(
+                d_slice, q_slice, c_slice,
+                clean_donors, q_slice, clean_context,
+                target=target[index:index + 1],
+            )
+            shapley = model.shapley_interactions(d_slice, q_slice, c_slice)
+        attribution = model.attribute(d_slice, q_slice, c_slice)
+        ig = model.integrated_gradients(d_slice, q_slice, c_slice, steps=128)
+        cal_probs = softmax_temperature(logits_np, temperature=cal["temperature"])
+        ep_trust = float(detail["epistemic_trust"][0])
+        conflict_val = float(detail["queried_conflict_jsd"][0])
+        raps = raps_prediction_sets(
+            cal_probs, q_hat, k_reg=1, lam_reg=0.02,
+            epistemic_trust=np.array([ep_trust]) if model.forensic else None,
+            epistemic_threshold=model.epistemic_threshold,
+        )
+        nex_raps = nex_raps_prediction_sets(
+            logits_np, temperature=cal["temperature"], q_hat=q_hat,
+            conflict_jsd=np.array([conflict_val]), cal_conflict_q95=cal["val_conflict_q95"],
+            k_reg=1, lam_reg=0.02,
+            epistemic_trust=np.array([ep_trust]) if model.forensic else None,
+            epistemic_threshold=model.epistemic_threshold,
+        )
+        m_det = _mahalanobis_cached(study_dir, row["seed"], split, posteriors)
+        m_scores = score_mahalanobis_forensics(d_slice.cpu().numpy(), m_det)
+        patch_summary = {
+            node: {
+                "prediction": int(info["prediction"][0]),
+                "restoration": float(info["restoration"][0]),
+                "prob_shift": float(info["prob_shift"][0]),
+                "kl_to_cf": float(info["kl_to_cf"][0]),
+            }
+            for node, info in patching["patches"].items()
+        }
         source, operation = batch["query"][index].tolist()
         return {"index": index, "arm": arm, "mode": mode, "seed": row["seed"], "protocol": config.protocol,
                 "images": split["images"][image_ids[index]].tolist(),
                 "query": {"source": source, "operation": operation, "label": ["identity", "next digit modulo ten", "mirror (9 - digit)"][operation]},
                 "target": int(target[index]), "prediction": int(np.argmax(probabilities)), "probabilities": probabilities,
+                "calibrated_probabilities": cal_probs[0].tolist(),
+                "temperature": cal["temperature"],
+                "conformal_alpha": float(alpha),
+                "conformal_q_hat": float(q_hat),
+                "conformal_set": raps["prediction_sets"][0],
+                "nex_conformal_set": nex_raps["prediction_sets"][0],
                 "source_weights": detail["source_weights"][0].tolist(), "expert_weights": detail["expert_weights"][0].tolist(),
                 "trust_score": detail["trust_score"][0].tolist(), "tail_entropy": detail["tail_entropy"][0].tolist(),
+                "mahalanobis_distance": m_scores["mahalanobis_distance"][0].tolist(),
+                "hybrid_trust": m_scores["hybrid_trust"][0].tolist(),
                 "expert_margin": detail["expert_margin"][0].tolist(), "damaged_experts": damaged_experts,
-                "epistemic_trust": float(detail["epistemic_trust"][0]),
+                "epistemic_trust": ep_trust,
+                "aleatoric_uncertainty": float(detail["queried_aleatoric"][0]),
+                "epistemic_conflict_jsd": conflict_val,
+                "forensic_spoof_risk": float(detail["forensic_spoof_risk"][0]),
                 "abstain": bool(detail["abstain"][0]),
                 "selective_prediction": int(detail["selective_prediction"][0]),
                 "source_saliency": attribution["source_saliency"][0].tolist(),
                 "expert_saliency": attribution["expert_saliency"][0].tolist(),
+                "ig_source_saliency": ig["source_saliency"][0].tolist(),
+                "ig_expert_saliency": ig["expert_saliency"][0].tolist(),
+                "ig_completeness_error": float(ig["completeness_error"][0]),
+                "shapley_values": shapley["shapley_values"][0].tolist(),
+                "shapley_interaction_matrix": shapley["interaction_matrix"][0].tolist(),
+                "shapley_efficiency_error": float(shapley["efficiency_error"][0]),
+                "coalition_payoffs": {k: round(float(v[0]), 4) for k, v in shapley["coalition_payoffs"].items()},
+                "interchange_patching": patch_summary,
                 "context": context[index].tolist(), "note": "Learned weights are routing summaries, not causal explanations. Compare controlled interventions."}
     finally:
         torch.set_num_threads(previous_threads)
@@ -446,7 +598,9 @@ def inspect_example(study_dir: Path, index: int = 0, arm: str = "tether",
 def live_predict(study_dir: Path, pixels: list[float] | None = None,
                  digit: int = 3, source: int = 0, operation: int = 0,
                  tamper_mode: str = "none", corrupted_class: int = 4,
-                 confidence: float = 0.991, arm: str = "tether", seed: int | None = None) -> dict:
+                 confidence: float = 0.991, arm: str = "tether",
+                 seed: int | None = None, alpha: float = 0.05,
+                 defense: bool = False) -> dict:
     """Run live interactive inference and tamper simulation on real/custom digit inputs."""
     study_dir = Path(study_dir).resolve()
     summary = json.loads((study_dir / "summary.json").read_text(encoding="utf-8"))
@@ -455,9 +609,10 @@ def live_predict(study_dir: Path, pixels: list[float] | None = None,
     previous_threads = torch.get_num_threads()
     torch.set_num_threads(config.threads)
     try:
-        model, split, _, _ = _restore(study_dir, row, config)
-        # Restore donor bank from row checkpoint
-        ckpt = torch.load(safe_artifact(study_dir, row["checkpoint"]), map_location="cpu", weights_only=True)
+        model, split, all_posteriors, ckpt = _restore(study_dir, row, config)
+        cal = _calibrate_cached(study_dir, row, config, model, split, all_posteriors)
+        q_hat = conformal_quantile(cal["val_scores"], alpha=float(alpha))
+        m_det = _mahalanobis_cached(study_dir, row["seed"], split, all_posteriors)
         bank = DonorBank(config=ckpt["bank_config"])
         bank.load_state_dict(ckpt["bank_state"])
         bank.eval()
@@ -481,46 +636,396 @@ def live_predict(study_dir: Path, pixels: list[float] | None = None,
 
         with torch.no_grad():
             specialist_logits = bank(stacked_images)
-            posteriors = specialist_logits.softmax(-1).unsqueeze(0)
+            clean_posteriors = specialist_logits.softmax(-1).unsqueeze(0)
 
-        damaged_experts = []
-        if tamper_mode in ("corrupt_1", "corrupt_2", "corrupt_3"):
-            count = 1 if tamper_mode == "corrupt_1" else (2 if tamper_mode == "corrupt_2" else 3)
-            damaged_experts = list(range(count))
-            conf = max(0.5, min(0.999, confidence))
-            other_p = (1.0 - conf) / 9.0
-            corrupted_vec = torch.full((10,), other_p, dtype=torch.float32)
-            corrupted_vec[corrupted_class % 10] = conf
-            for e in damaged_experts:
-                posteriors[0, source, e] = corrupted_vec
+        raw_posteriors, damaged_experts = _apply_tamper_tensor(
+            clean_posteriors, source, tamper_mode, corrupted_class, confidence
+        )
+        sanitized_info = sanitize_specialist_posteriors(raw_posteriors.cpu().numpy(), m_det)
+        sanitized_posteriors = torch.tensor(sanitized_info["sanitized_posteriors"], dtype=torch.float32)
+        active_posteriors = sanitized_posteriors if defense else raw_posteriors
 
         query_t = torch.tensor([[source, operation]], dtype=torch.long)
         context_t = torch.full((1, 10), 0.1, dtype=torch.float32)
         with torch.no_grad():
-            detail = model.inspect(posteriors, query_t, context_t)
+            detail = model.inspect(active_posteriors, query_t, context_t)
+            sanitized_detail = model.inspect(sanitized_posteriors, query_t, context_t)
+            clean_detail = model.inspect(clean_posteriors, query_t, context_t)
+            logits_np = detail["logits"].cpu().numpy()
             probabilities = detail["logits"].softmax(-1)[0].tolist()
+            clean_target = clean_detail["logits"].argmax(-1)
+            patching = model.interchange_intervention(
+                active_posteriors, query_t, context_t,
+                clean_posteriors, query_t, context_t,
+                target=clean_target,
+            )
+            shapley = model.shapley_interactions(active_posteriors, query_t, context_t, target=clean_target)
 
-        attribution = model.attribute(posteriors, query_t, context_t)
+        attribution = model.attribute(active_posteriors, query_t, context_t)
+        ig = model.integrated_gradients(active_posteriors, query_t, context_t, steps=128)
+        cal_probs = softmax_temperature(logits_np, temperature=cal["temperature"])
+        ep_trust = float(detail["epistemic_trust"][0])
+        hybrid_queried_trust = float(sanitized_info["hybrid_trust"][0, source].max())
+        effective_trust = hybrid_queried_trust if defense else ep_trust
+        abstain_flag = (effective_trust < model.epistemic_threshold) if (model.forensic or defense) else False
+        pred_class = int(np.argmax(probabilities))
+        sel_pred = -1 if abstain_flag else pred_class
+        conflict_val = float(detail["queried_conflict_jsd"][0])
+
+        raps = raps_prediction_sets(
+            cal_probs, q_hat, k_reg=1, lam_reg=0.02,
+            epistemic_trust=np.array([effective_trust]) if (model.forensic or defense) else None,
+            epistemic_threshold=model.epistemic_threshold,
+        )
+        nex_raps = nex_raps_prediction_sets(
+            logits_np, temperature=cal["temperature"], q_hat=q_hat,
+            conflict_jsd=np.array([conflict_val]), cal_conflict_q95=cal["val_conflict_q95"],
+            k_reg=1, lam_reg=0.02,
+            epistemic_trust=np.array([effective_trust]) if (model.forensic or defense) else None,
+            epistemic_threshold=model.epistemic_threshold,
+        )
+        patch_summary = {
+            node: {
+                "prediction": int(info["prediction"][0]),
+                "restoration": float(info["restoration"][0]),
+                "prob_shift": float(info["prob_shift"][0]),
+                "kl_to_cf": float(info["kl_to_cf"][0]),
+            }
+            for node, info in patching["patches"].items()
+        }
         operation_names = ["identity", "next digit modulo ten", "mirror (9 - digit)"]
+        san_abstain = bool(hybrid_queried_trust < model.epistemic_threshold)
+        san_pred = int(sanitized_detail["logits"].argmax(-1)[0])
 
         return {
             "source": source,
             "operation": operation,
             "operation_label": operation_names[operation],
             "tamper_mode": tamper_mode,
+            "defense": bool(defense),
             "damaged_experts": damaged_experts,
-            "prediction": int(np.argmax(probabilities)),
+            "prediction": pred_class,
+            "clean_prediction": int(clean_target[0]),
+            "sanitized_prediction": -1 if san_abstain else san_pred,
+            "sanitized_abstain": san_abstain,
             "probabilities": probabilities,
+            "calibrated_probabilities": cal_probs[0].tolist(),
+            "temperature": cal["temperature"],
+            "conformal_alpha": float(alpha),
+            "conformal_q_hat": float(q_hat),
+            "conformal_set": raps["prediction_sets"][0],
+            "nex_conformal_set": nex_raps["prediction_sets"][0],
             "source_weights": detail["source_weights"][0].tolist(),
             "expert_weights": detail["expert_weights"][0].tolist(),
             "trust_score": detail["trust_score"][0].tolist(),
             "tail_entropy": detail["tail_entropy"][0].tolist(),
-            "epistemic_trust": float(detail["epistemic_trust"][0]),
-            "abstain": bool(detail["abstain"][0]),
-            "selective_prediction": int(detail["selective_prediction"][0]),
+            "mahalanobis_distance": sanitized_info["mahalanobis_distance"][0, source].tolist(),
+            "hybrid_trust": sanitized_info["hybrid_trust"][0, source].tolist(),
+            "flagged_specialists": sanitized_info["flagged_specialists"][0, source].tolist(),
+            "epistemic_trust": ep_trust,
+            "hybrid_epistemic_trust": hybrid_queried_trust,
+            "aleatoric_uncertainty": float(detail["queried_aleatoric"][0]),
+            "epistemic_conflict_jsd": conflict_val,
+            "forensic_spoof_risk": float(1.0 - effective_trust),
+            "abstain": bool(abstain_flag),
+            "selective_prediction": int(sel_pred),
             "source_saliency": attribution["source_saliency"][0].tolist(),
             "expert_saliency": attribution["expert_saliency"][0].tolist(),
+            "ig_source_saliency": ig["source_saliency"][0].tolist(),
+            "ig_expert_saliency": ig["expert_saliency"][0].tolist(),
+            "ig_completeness_error": float(ig["completeness_error"][0]),
+            "shapley_values": shapley["shapley_values"][0].tolist(),
+            "shapley_interaction_matrix": shapley["interaction_matrix"][0].tolist(),
+            "shapley_efficiency_error": float(shapley["efficiency_error"][0]),
+            "coalition_payoffs": {k: round(float(v[0]), 4) for k, v in shapley["coalition_payoffs"].items()},
+            "specialist_predictions": raw_posteriors[0, source].argmax(-1).tolist(),
+            "specialist_confidences": raw_posteriors[0, source].max(-1).values.tolist(),
+            "interchange_patching": patch_summary,
             "images": [img.tolist() for img in all_images],
+        }
+    finally:
+        torch.set_num_threads(previous_threads)
+
+
+def live_arena(study_dir: Path, pixels: list[float] | None = None,
+               digit: int = 3, source: int = 0, operation: int = 0,
+               tamper_mode: str = "clean", corrupted_class: int = 4,
+               confidence: float = 0.991, seed: int | None = None,
+               alpha: float = 0.05, defense: bool = False) -> dict:
+    """Compare all 7 receiver arms side-by-side and run a live adversarial phase-transition sweep."""
+    study_dir = Path(study_dir).resolve()
+    summary = json.loads((study_dir / "summary.json").read_text(encoding="utf-8"))
+    config = StudyConfig(**summary["config"])
+    chosen_seed = seed if seed is not None else config.seeds[0]
+    if chosen_seed not in config.seeds:
+        raise ValueError("invalid study seed")
+    if tamper_mode == "none":
+        tamper_mode = "clean"
+    previous_threads = torch.get_num_threads()
+    torch.set_num_threads(config.threads)
+    try:
+        seed_rows = {r["arm"]: r for r in summary["rows"] if r["seed"] == chosen_seed}
+        first_row = next(iter(seed_rows.values()))
+        _, split, all_posteriors, first_ckpt = _restore(study_dir, first_row, config)
+        m_det = _mahalanobis_cached(study_dir, chosen_seed, split, all_posteriors)
+        bank = DonorBank(config=first_ckpt["bank_config"])
+        bank.load_state_dict(first_ckpt["bank_state"])
+        bank.eval()
+
+        if pixels is not None and len(pixels) == 64:
+            queried_image = torch.tensor(pixels, dtype=torch.float32).clamp(0.0, 1.0)
+        else:
+            cand = split["test"][split["labels"][split["test"]] == digit]
+            chosen_id = cand[0] if len(cand) > 0 else split["test"][0]
+            queried_image = split["images"][chosen_id]
+
+        bg_images = [split["images"][split["test"][(i + 1) * 10]] for i in range(2)]
+        all_images = [None] * 3
+        all_images[source] = queried_image
+        bg_idx = 0
+        for i in range(3):
+            if all_images[i] is None:
+                all_images[i] = bg_images[bg_idx]
+                bg_idx += 1
+        stacked_images = torch.stack(all_images)
+
+        with torch.no_grad():
+            specialist_logits = bank(stacked_images)
+            clean_posteriors = specialist_logits.softmax(-1).unsqueeze(0)
+
+        def _make_tampered(tm: str, conf_val: float) -> tuple[torch.Tensor, list[int]]:
+            raw_p, dmg = _apply_tamper_tensor(clean_posteriors, source, tm, corrupted_class, conf_val)
+            if defense:
+                san = sanitize_specialist_posteriors(raw_p.cpu().numpy(), m_det)
+                return torch.tensor(san["sanitized_posteriors"], dtype=torch.float32), dmg
+            return raw_p, dmg
+
+        raw_posteriors, damaged_experts = _apply_tamper_tensor(
+            clean_posteriors, source, tamper_mode, corrupted_class, confidence
+        )
+        san_info = sanitize_specialist_posteriors(raw_posteriors.cpu().numpy(), m_det)
+        posteriors = torch.tensor(san_info["sanitized_posteriors"], dtype=torch.float32) if defense else raw_posteriors
+        intact_experts = [e for e in range(3) if e not in damaged_experts]
+        query_t = torch.tensor([[source, operation]], dtype=torch.long)
+        context_t = torch.full((1, 10), 0.1, dtype=torch.float32)
+        hybrid_queried_trust = float(san_info["hybrid_trust"][0, source].max())
+
+        # Infer baseline digit from clean specialist consensus + task transform
+        clean_digit = int(clean_posteriors[0, source].mean(0).argmax().item())
+        expected_target = [clean_digit, (clean_digit + 1) % 10, 9 - clean_digit][operation]
+
+        arm_results = []
+        models_by_arm = {}
+        for arm_name in config.arms:
+            if arm_name not in seed_rows:
+                continue
+            row = seed_rows[arm_name]
+            model, _, _, _ = _restore(study_dir, row, config)
+            models_by_arm[arm_name] = model
+            cal = _calibrate_cached(study_dir, row, config, model, split, all_posteriors)
+            q_hat = conformal_quantile(cal["val_scores"], alpha=float(alpha))
+            with torch.no_grad():
+                detail = model.inspect(posteriors, query_t, context_t)
+                clean_detail = model.inspect(clean_posteriors, query_t, context_t)
+                logits_np = detail["logits"].cpu().numpy()
+                probs = detail["logits"].softmax(-1)[0].tolist()
+                shapley = model.shapley_interactions(posteriors, query_t, context_t, target=torch.tensor([expected_target]))
+            cal_probs = softmax_temperature(logits_np, temperature=cal["temperature"])
+            ep_trust = hybrid_queried_trust if defense else float(detail["epistemic_trust"][0])
+            conflict_val = float(detail["queried_conflict_jsd"][0])
+            raps = raps_prediction_sets(
+                cal_probs, q_hat, k_reg=1, lam_reg=0.02,
+                epistemic_trust=np.array([ep_trust]) if (model.forensic or defense) else None,
+                epistemic_threshold=model.epistemic_threshold,
+            )
+            nex_raps = nex_raps_prediction_sets(
+                logits_np, temperature=cal["temperature"], q_hat=q_hat,
+                conflict_jsd=np.array([conflict_val]), cal_conflict_q95=cal["val_conflict_q95"],
+                k_reg=1, lam_reg=0.02,
+                epistemic_trust=np.array([ep_trust]) if (model.forensic or defense) else None,
+                epistemic_threshold=model.epistemic_threshold,
+            )
+            ew = detail["expert_weights"][0, source].tolist()
+            intact_share = sum(ew[e] for e in intact_experts) if intact_experts else 0.0
+            pred = int(np.argmax(probs))
+            abstain = (ep_trust < model.epistemic_threshold) if (model.forensic or defense) else bool(detail["abstain"][0])
+            sel_pred = -1 if abstain else pred
+            if tamper_mode in ("corrupt_3", "stealth_3"):
+                survived = abstain
+            else:
+                survived = (not abstain) and (pred == expected_target)
+            arm_results.append({
+                "arm": arm_name,
+                "prediction": pred,
+                "clean_prediction": int(clean_detail["logits"].argmax(-1)[0]),
+                "selective_prediction": sel_pred,
+                "abstain": bool(abstain),
+                "confidence": float(max(probs)),
+                "target_probability": float(probs[expected_target]),
+                "probabilities": probs,
+                "conformal_set": raps["prediction_sets"][0],
+                "nex_conformal_set": nex_raps["prediction_sets"][0],
+                "conformal_q_hat": float(q_hat),
+                "temperature": cal["temperature"],
+                "queried_source_weight": float(detail["source_weights"][0, source]),
+                "expert_weights": ew,
+                "intact_weight_share": float(intact_share),
+                "epistemic_trust": ep_trust,
+                "shapley_values": [round(float(x), 4) for x in shapley["shapley_values"][0].tolist()],
+                "survived": bool(survived),
+            })
+
+        # Build live adversarial confidence & regime sweep for key arms
+        sweep_arms = [a for a in ("tether", "iit", "unpaired", "passive") if a in models_by_arm]
+        conf_grid = [0.55, 0.70, 0.85, 0.92, 0.96, 0.991]
+        active_sweep_mode = (
+            tamper_mode
+            if tamper_mode in ("corrupt_1", "corrupt_2", "corrupt_3", "stealth_1", "stealth_2", "stealth_3")
+            else "corrupt_2"
+        )
+        sweep_tensors = torch.cat([_make_tampered(active_sweep_mode, c)[0] for c in conf_grid], dim=0)
+        q_sweep = query_t.expand(len(conf_grid), -1)
+        c_sweep = context_t.expand(len(conf_grid), -1)
+        sweep_curves = {}
+        with torch.no_grad():
+            for arm_name in sweep_arms:
+                m = models_by_arm[arm_name]
+                det = m.inspect(sweep_tensors, q_sweep, c_sweep)
+                pr = det["logits"].softmax(-1)
+                preds = pr.argmax(-1).tolist()
+                target_probs = pr[:, expected_target].tolist()
+                sweep_curves[arm_name] = {
+                    "target_probabilities": [round(float(x), 4) for x in target_probs],
+                    "predictions": [int(x) for x in preds],
+                    "epistemic_trust": [round(float(x), 4) for x in det["epistemic_trust"].tolist()],
+                }
+
+        return {
+            "seed": chosen_seed,
+            "source": source,
+            "operation": operation,
+            "tamper_mode": tamper_mode,
+            "defense": bool(defense),
+            "corrupted_class": corrupted_class,
+            "confidence": confidence,
+            "conformal_alpha": float(alpha),
+            "clean_digit": clean_digit,
+            "expected_target": expected_target,
+            "damaged_experts": damaged_experts,
+            "mahalanobis_distance": [round(float(x), 3) for x in san_info["mahalanobis_distance"][0, source].tolist()],
+            "hybrid_trust": [round(float(x), 4) for x in san_info["hybrid_trust"][0, source].tolist()],
+            "arms": arm_results,
+            "sweep": {
+                "mode": active_sweep_mode,
+                "confidences": conf_grid,
+                "curves": sweep_curves,
+            },
+        }
+    finally:
+        torch.set_num_threads(previous_threads)
+
+
+def calibrate_study(study_dir: Path, alpha: float = 0.05, seed: int | None = None) -> dict:
+    """Evaluate Split Conformal RAPS sets, temperature scaling, and ECE across a saved study."""
+    study_dir = Path(study_dir).resolve()
+    summary = json.loads((study_dir / "summary.json").read_text(encoding="utf-8"))
+    if summary.get("schema") != "supermix-tether-study-v1" or summary.get("status") != "complete":
+        raise ValueError("unsupported or incomplete study")
+    if not isinstance(alpha, (int, float)) or isinstance(alpha, bool) or not 0.0 < alpha < 1.0:
+        raise ValueError("alpha must lie strictly between 0 and 1")
+    config = StudyConfig(**summary["config"])
+    if seed is not None and seed not in config.seeds:
+        raise ValueError("invalid study seed")
+    conditions = _conditions(config.protocol)
+    previous_threads = torch.get_num_threads()
+    torch.set_num_threads(config.threads)
+    try:
+        rows_out = []
+        for row in summary["rows"]:
+            if seed is not None and row["seed"] != seed:
+                continue
+            model, split, posteriors, _ = _restore(study_dir, row, config)
+            cal = _calibrate_cached(study_dir, row, config, model, split, posteriors)
+            q_hat = conformal_quantile(cal["val_scores"], alpha=float(alpha))
+            loaded = np.load(safe_artifact(study_dir, row["trace"]), allow_pickle=False)
+            cond_metrics = {}
+            for cond in conditions:
+                logits = loaded[f"{cond}__factual"]
+                targets = loaded[f"{cond}__target"]
+                pre_cal = calibration_metrics(logits, targets, temperature=1.0)
+                post_cal = calibration_metrics(logits, targets, temperature=cal["temperature"])
+                cal_probs = softmax_temperature(logits, temperature=cal["temperature"])
+                # For common-mode or forensic receiver, evaluate epistemic trust on the batch
+                if model.forensic and cond in ("damage_common", "damage_two", "damage_one", "heldout_independent"):
+                    batch = _batch(posteriors, split, config, row["seed"], cond)
+                    with torch.no_grad():
+                        insp = model.inspect(batch["donors"], batch["query"], batch["context"])
+                        ep_trust = insp["epistemic_trust"].cpu().numpy()
+                        conflict_jsd = insp["queried_conflict_jsd"].cpu().numpy()
+                else:
+                    ep_trust = None
+                    conflict_jsd = np.zeros(len(targets), dtype=np.float64)
+                conf_eval = evaluate_conformal_sets(
+                    cal_probs, targets, q_hat, k_reg=1, lam_reg=0.02,
+                    epistemic_trust=ep_trust, epistemic_threshold=model.epistemic_threshold,
+                )
+                nex_eval = evaluate_nex_conformal_sets(
+                    logits, targets, temperature=cal["temperature"], q_hat=q_hat,
+                    conflict_jsd=conflict_jsd, cal_conflict_q95=cal["val_conflict_q95"],
+                    k_reg=1, lam_reg=0.02,
+                    epistemic_trust=ep_trust, epistemic_threshold=model.epistemic_threshold,
+                )
+                aci_eval = adaptive_conformal_inference(
+                    cal["val_scores"], cal_probs, targets, alpha=float(alpha),
+                    gamma=0.05, k_reg=1, lam_reg=0.02,
+                    epistemic_trust=ep_trust, epistemic_threshold=model.epistemic_threshold,
+                )
+                cond_metrics[cond] = {
+                    "ece_pre": pre_cal["ece"],
+                    "ece_post": post_cal["ece"],
+                    "brier_post": post_cal["brier"],
+                    "nll_post": post_cal["nll"],
+                    **conf_eval,
+                    "nex_marginal_coverage": nex_eval["marginal_coverage"],
+                    "nex_mean_set_size": nex_eval["mean_set_size"],
+                    "aci_marginal_coverage": aci_eval["marginal_coverage"],
+                    "aci_mean_set_size": aci_eval["mean_set_size"],
+                }
+            loaded.close()
+            rows_out.append({
+                "seed": row["seed"],
+                "arm": row["arm"],
+                "temperature": cal["temperature"],
+                "q_hat": float(q_hat),
+                "conditions": cond_metrics,
+            })
+
+        # Aggregate means per arm across evaluated seeds
+        by_arm = {}
+        for arm_name in config.arms:
+            arm_rows = [r for r in rows_out if r["arm"] == arm_name]
+            if not arm_rows:
+                continue
+            agg_conds = {}
+            for cond in conditions:
+                keys = arm_rows[0]["conditions"][cond].keys()
+                agg_conds[cond] = {
+                    k: round(float(np.mean([r["conditions"][cond][k] for r in arm_rows])), 5)
+                    for k in keys
+                }
+            by_arm[arm_name] = {
+                "mean_temperature": round(float(np.mean([r["temperature"] for r in arm_rows])), 5),
+                "mean_q_hat": round(float(np.mean([r["q_hat"] for r in arm_rows])), 5),
+                "seeds": [r["seed"] for r in arm_rows],
+                "conditions": agg_conds,
+            }
+
+        return {
+            "schema": "supermix-tether-conformal-v1",
+            "protocol": config.protocol,
+            "alpha": float(alpha),
+            "target_coverage": round(1.0 - float(alpha), 4),
+            "summary_by_arm": by_arm,
         }
     finally:
         torch.set_num_threads(previous_threads)

@@ -1,6 +1,6 @@
-# Supermix Tether empirical results (v0.1 → v0.2)
+# Supermix Tether empirical results (v0.1 → v0.5)
 
-Recorded on 24 October 2026 · Protocols: [`docs/frozen-protocol.json`](frozen-protocol.json) (v0.1) and [`docs/v2-protocol.json`](v2-protocol.json) (v0.2)
+Recorded on 24 October – 1 November 2026 · Protocols: [`docs/frozen-protocol.json`](frozen-protocol.json) (v0.1) and [`docs/v2-protocol.json`](v2-protocol.json) (v0.2)
 
 ---
 
@@ -191,7 +191,96 @@ The local laboratory web interface (`http://127.0.0.1:8797`) features an interac
 
 ---
 
-## 7. Interpretation boundaries
+## 7. Supermix Tether v0.4: Split Conformal Prediction (RAPS), Temperature Calibration, Tri-Part Uncertainty, Axiomatic IG & Causal Circuit Patching
+
+In v0.4, Supermix Tether advances uncertainty quantification, mechanistic interpretability, and interactive verification across all 56 frozen confirmation checkpoints (`outputs/v2-confirmation`, seeds `101..108`) without altering any sealed checkpoint weights or replay traces.
+
+### 7.1 Post-Hoc Temperature Scaling & Split Conformal Prediction (RAPS)
+
+For each seed and arm, `tether.conformal` fits a temperature parameter $T^* > 0$ by minimizing negative log-likelihood on the frozen `seen_independent` validation cohort (Guo et al., ICML 2017, [arXiv:1706.04599](https://arxiv.org/abs/1706.04599)) and calibrates Regularized Adaptive Prediction Sets (RAPS; Angelopoulos et al., ICLR 2021, [arXiv:2009.14193](https://arxiv.org/abs/2009.14193)) with nonconformity score:
+$$s_{\text{RAPS}}(x, y) = \sum_{c : \hat{\pi}_c(x) > \hat{\pi}_y(x)} \hat{\pi}_c(x) + u \cdot \hat{\pi}_y(x) + \lambda_{\text{reg}} \max(0, \text{rank}(y) - k_{\text{reg}})$$
+where $k_{\text{reg}} = 1$, $\lambda_{\text{reg}} = 0.02$, and $\hat{q}_{1-\alpha}$ is the finite-sample order statistic $\lceil (n_{\text{cal}} + 1)(1 - \alpha)\rceil / n_{\text{cal}}$ at $\alpha = 0.05$ (`95%` target coverage). Under Epistemic-Gated Conformal Risk Control (Angelopoulos et al., ICLR 2024, [arXiv:2208.02814](https://arxiv.org/abs/2208.02814)), inputs with dark-knowledge epistemic trust $\tau(x) < \theta = 0.10$ trigger selective abstention ($\mathcal{C}_{1-\alpha}(x) = \emptyset$).
+
+Reproduce across all 8 seeds and 7 arms via:
+```powershell
+python -m tether calibrate outputs/v2-confirmation --alpha 0.05
+```
+
+#### Eight-Seed Conformal & Calibration Summary (`outputs/v2-confirmation`, $\alpha = 0.05$)
+
+| Arm | Mean $T^*$ | Mean $\hat{q}_{0.95}$ | `heldout_independent` ECE (pre $\to$ post) | `heldout_independent` Brier | `heldout_independent` Coverage | `heldout_independent` Set Size | `damage_two` (2/3) Coverage | `damage_two` Miscoverage Risk | `damage_common` (3/3) Abstain / Selective Risk |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `passive` | 0.6518 | 1.2676 | 0.1536 $\to$ 0.0791 | 0.3837 | 96.17% | 1.766 | 36.43% | 63.57% | 100.0% / 0.00% |
+| `dropout` | 0.5696 | 1.2021 | 0.2098 $\to$ 0.0797 | 0.2915 | 95.48% | 1.575 | 50.61% | 49.39% | 100.0% / 0.00% |
+| `iit` | 0.7823 | 0.1205 | 0.0566 $\to$ 0.0220 | 0.0310 | 98.12% | 1.000 | 80.76% | 19.24% | 100.0% / 0.00% |
+| `effect_only` | 0.8123 | 0.1002 | 0.0521 $\to$ 0.0268 | 0.0312 | 98.19% | 1.000 | 79.03% | 20.97% | 100.0% / 0.00% |
+| `invariance_only` | 0.7593 | 0.1417 | 0.0616 $\to$ 0.0236 | 0.0295 | 98.24% | 1.000 | 97.78% | 2.22% | 100.0% / 0.00% |
+| `unpaired` | 0.5841 | 0.8143 | 0.1669 $\to$ 0.0412 | 0.1005 | 95.24% | 1.060 | 15.06% | 84.94% | 100.0% / 0.00% |
+| **`tether`** | **0.7972** | **0.1293** | **0.0536 $\to$ 0.0243** | **0.0288** | **98.19%** | **1.000** | **97.75%** | **2.25%** | **100.0% / 0.00%** |
+
+**Key Conformal Findings:**
+1. **54.7% ECE Reduction:** Validation temperature scaling ($T^* = 0.7972$) cuts `tether` Expected Calibration Error on `heldout_independent` from `0.05358` to `0.02427` (`Brier = 0.02880`, lowest among all arms).
+2. **Survival of Conformal Coverage under Zero-Shot 2-of-3 Specialist Corruption (`damage_two`):** Because exchangeability is violated when 2 of 3 specialists are adversarially corrupted, standard conformal prediction on `iit` suffers a coverage collapse from `98.12%` down to `80.76%` (`19.24%` miscoverage risk vs. nominal $\alpha = 5\%$), and `unpaired` collapses to `15.06%`. Because `tether` routes around the corrupted majority via perturbation-localized invariance and dark-knowledge forensics, its representation remains invariant on the queried pathway and **retains `97.75%` empirical coverage (`2.25%` miscoverage risk $< 5\%$) with singleton sets (`mean_set_size = 1.000`)**.
+
+### 7.2 Tri-Part Information-Theoretic Uncertainty Decomposition
+
+`TetherReceiver._compute` decomposes queried-source uncertainty into three distinct signals in $[0, 1]$ (Sensoy et al., NeurIPS 2018, [arXiv:1806.01768](https://arxiv.org/abs/1806.01768)):
+1. **Aleatoric Input Entropy:** $U_{\text{aleatoric}}(s) = \sum_{e=1}^3 w_{s,e} \frac{H(P_{s,e})}{\log 10}$, measuring specialist-level visual ambiguity.
+2. **Inter-Specialist Conflict (Normalized Jensen-Shannon Divergence):**
+   $$U_{\text{conflict}}(s) = \frac{\text{JSD}(P_{s,1}, P_{s,2}, P_{s,3})}{\log 10} = \frac{H(\bar{P}_s) - \frac{1}{3}\sum_{e=1}^3 H(P_{s,e})}{\log 10}$$
+   measuring disagreement across the three specialists.
+3. **Forensic Dark-Knowledge Spoof Risk:** $U_{\text{spoof}}(s) = 1 - \tau_s = 1 - \max_e (1 - H(P_{s,e,-1})/\log 9)^+$.
+
+**Why JSD Alone Fails on 3/3 Common-Mode Spoofing:** Under 1/3 (`damage_one`) and 2/3 (`damage_two`) corruption, intact and corrupted specialists disagree, causing $U_{\text{conflict}}$ ($\text{JSD}$) to spike (`> 0.15`). However, under 3/3 common-mode spoofing (`damage_common`), all three corrupted specialists output the exact same fabricated distribution, causing $\text{JSD}$ to collapse to **`0.0000`**. Only $U_{\text{spoof}} = 1 - \tau_s = 1.0000$ detects the missing dark-knowledge runner-up structure and gates the receiver to abstain.
+
+### 7.3 Axiomatic Integrated Gradients & Causal Circuit Patching
+
+- **Axiomatic Integrated Gradients (`TetherReceiver.integrated_gradients`):** Integrates gradients along the simplex path from uniform donor baseline $P^{(0)}_{s,e,c} = 0.1$ to $P_{s,e,c}$ (Sundararajan et al., ICML 2017, [arXiv:1703.01365](https://arxiv.org/abs/1703.01365)). Because the normalized 9-class runner-up tail $P_{s,e,-1} / \sum_{c \neq c^*} P_{s,e,c}$ exhibits a sharp boundary layer near $\alpha \to 1$ when intact specialist tail mass is $\sim 10^{-5}$, `integrated_gradients` parameterizes $u = 1 - \alpha = (1 - t)^4$ using the positive convex combination $(1 - u)P + u P^{(0)}$, avoiding `float32` subtractive cancellation and satisfying completeness within `< 0.02` logits across clean and `damage_two` inputs.
+- **Causal Abstraction Interchange Interventions (`TetherReceiver.interchange_intervention`):** Performs activation patching (Geiger et al., ICML 2022; JMLR 2025, [arXiv:2301.04709](https://arxiv.org/abs/2301.04709)) from clean counterfactual runs into corrupted base runs across all 6 internal receiver nodes (`expert_weights`, `source_posteriors`, `source_weights`, `pooled_posterior`, `task_logits`, `shortcut_logits`), measuring normalized logit restoration and KL divergence to the clean counterfactual output.
+
+---
+
+## 8. Supermix Tether v0.5: Cooperative Specialist Shapley & Shapley-Taylor Interactions, Non-Exchangeable & Online Adaptive Conformal Inference, and Spectral-Mahalanobis Stealth-Spoof Defense
+
+In v0.5, Supermix Tether introduces three research-backed advances across coalitional game theory, distribution-free conformal inference under shift, and multivariate dark-knowledge forensics.
+
+### 8.1 Cooperative Specialist Shapley Values ($\phi_e$) & Exact Order-2 Shapley-Taylor Interactions ($I^{(2)}_{ij}$)
+
+`TetherReceiver.shapley_interactions(donors, query, context, target)` evaluates all $2^3 = 8$ specialist coalitions $S \subseteq \{0, 1, 2\}$ on the queried source $s^*$ in a single batched pass by replacing absent specialists $e \notin S$ with the maximum-entropy uniform baseline $P^{(0)}_{s^*,e,c} = 1/10$ (Lundberg & Lee, NeurIPS 2017, [arXiv:1705.07874](https://arxiv.org/abs/1705.07874); Sundararajan et al., ICML 2020, [arXiv:1902.05622](https://arxiv.org/abs/1902.05622)). From the coalition value function $v(S) = z_{\text{target}}(P^{(S)}) - z_{\text{rest}}(P^{(S)})$ and Harsanyi/Möbius dividends $d(S) = \sum_{T \subseteq S} (-1)^{|S|-|T|} v(T)$, v0.5 computes:
+- **Exact Specialist Shapley Values:** $\phi_i = \sum_{S : i \in S} \frac{d(S)}{|S|}$, satisfying $\sum_{i=0}^2 \phi_i = v(\{0,1,2\}) - v(\emptyset)$.
+- **Exact Order-2 Shapley-Taylor Interaction Matrix:** $I^{(2)}_{ii} = d(\{i\})$ and $I^{(2)}_{ij} = \sum_{S : \{i,j\} \subseteq S} \frac{2 d(S)}{|S|(|S|-1)}$ ($i \neq j$), satisfying $\sum_{i,j} I^{(2)}_{ij} = v(\{0,1,2\}) - v(\emptyset)$.
+
+Under 2-of-3 specialist corruption (`damage_two`), the Shapley-Taylor interaction matrix directly isolates why `tether` survives while `iit` fails: on `tether`, the single intact specialist carries almost the entire positive attribution ($\phi_{\text{intact}} \gg 0$) while the two corrupted specialists and their pairwise interaction are suppressed ($\phi_{c_1} \approx 0, \phi_{c_2} \approx 0, I^{(2)}_{c_1, c_2} \approx 0$).
+
+### 8.2 Non-Exchangeable Conflict-Adjusted RAPS (`nex_raps_prediction_sets`) & Online Adaptive Conformal Inference (`adaptive_conformal_inference`)
+
+When 2 of 3 specialists are corrupted (`damage_two`), exchangeability with the clean `seen_independent` calibration cohort is broken. In v0.5 (`tether/conformal.py` and `python -m tether calibrate outputs/v2-confirmation --alpha 0.05`), we compare standard exchangeable RAPS against **Conflict-Adjusted Non-Exchangeable RAPS (`Nex-RAPS`)** (Barber et al., Annals of Statistics 2023, [arXiv:2202.13415](https://arxiv.org/abs/2202.13415)) and **Online Adaptive Conformal Inference (`Online ACI`, $\gamma = 0.04$)** (Gibbs & Candès, NeurIPS 2021, [arXiv:2106.00170](https://arxiv.org/abs/2106.00170)) across all 8 confirmation seeds (`101..108`):
+
+| Arm | `heldout_independent` RAPS Cov / Size | `heldout_independent` ACI Cov / Size | `damage_two` (2/3) Standard RAPS Cov / Size | `damage_two` (2/3) Nex-RAPS Cov / Size | `damage_two` (2/3) Online ACI Cov / Size |
+|---|---:|---:|---:|---:|---:|
+| `passive` | 96.17% / 1.766 | 95.00% / 2.216 | 36.43% / 1.770 | **100.00%** / 9.997 | **90.87%** / 8.703 |
+| `dropout` | 95.48% / 1.575 | 95.04% / 2.084 | 50.61% / 1.605 | **100.00%** / 9.994 | **92.38%** / 8.219 |
+| `iit` | 98.12% / 1.000 | 98.12% / 1.000 | 80.76% / 1.000 | **99.49%** / 9.827 | **93.80%** / 5.444 |
+| `effect_only` | 98.19% / 1.000 | 98.19% / 1.000 | 79.03% / 1.000 | **99.39%** / 9.813 | **93.51%** / 5.701 |
+| `invariance_only` | 98.24% / 1.000 | 98.24% / 1.000 | 97.78% / 1.000 | **99.90%** / 9.831 | **97.78%** / 1.014 |
+| `unpaired` | 95.24% / 1.060 | 95.19% / 1.627 | 15.06% / 1.195 | **99.95%** / 9.968 | **94.78%** / 6.753 |
+| **`tether`** | **98.19% / 1.000** | **98.19% / 1.000** | **97.75% / 1.000** | **99.93% / 9.810** | **97.75% / 1.012** |
+
+**Key v0.5 Conformal Insight:**
+- For arms whose point accuracy degrades under `damage_two` (`iit` at `80.76%`, `unpaired` at `15.06%`), Online ACI (`adaptive_conformal_inference`) and Conflict-Adjusted Nex-RAPS (`nex_raps_prediction_sets`) successfully recover marginal coverage (`93.80%` and `99.49%` for `iit`; `94.78%` and `99.95%` for `unpaired`), necessarily expanding prediction set sizes (`5.444` to `9.968` classes) to absorb the base classifier's errors.
+- Because **`tether`** isolates the intact specialist at the representation level (`97.75%` point accuracy), it already exceeds the `95.0%` target coverage under `damage_two`, allowing Online ACI to maintain **`97.75%` coverage with near-singleton sets (`mean_set_size = 1.012`)**.
+
+### 8.3 Class-Conditional Spectral-Mahalanobis Forensics & Stealth-Spoof Sanitization
+
+In v0.2–v0.4, specialist forensics relied on 1D runner-up tail statistics: normalized 9-class Shannon entropy $H(p_{-1})/\log 9$ and standard deviation $\text{std}(p_{-1})$. In v0.5, we construct a white-box **Stealth Decoy-Spike Attack (`stealth_1`, `stealth_2`, `stealth_3`)** that sets peak confidence $p_{c_{\text{bad}}} = 0.96$, places $88\%$ of the remaining tail mass ($1 - p_{c_{\text{bad}}}$) on a single decoy runner-up class $c_{\text{decoy}} = (c_{\text{bad}} + 5) \bmod 10$, and distributes the remaining $12\%$ uniformly across the other 8 classes:
+- **Why 1D Tail Entropy Fails on `stealth_*`:** The normalized 9-class runner-up distribution $q_{\text{stealth}} = [0.88, 0.015, \dots, 0.015]$ has Shannon entropy $H(q_{\text{stealth}})/\log 9 \approx 0.289$, yielding a high 1D trust score $\tau = 1 - 0.289 = 0.711 > 0.10$. Without defense, `stealth_2` hijacks `tether`'s reliability weights and `stealth_3` bypasses 1D epistemic abstention ($\tau = 0.711 > 0.10$).
+- **How Spectral-Mahalanobis Forensics Defeats `stealth_*` (`fit_mahalanobis_forensics`, `score_mahalanobis_forensics`, `sanitize_specialist_posteriors`):** Genuine neural specialists (`ReLU-32`, `Tanh-48`, `GELU-64`) exhibit both class-specific runner-up confusion covariance $\Sigma_{e,c}$ and strictly positive deep-tail log-dispersion across ranks $3\dots 10$ ($\text{std}(\log p_{(3..10)}) > 0.65$), whereas synthetic flat (`corrupt_*`) and single-decoy (`stealth_*`) spoofs exhibit zero deep-tail dispersion ($\text{std}(\log p_{(3..10)}) = 0.0$) and out-of-manifold runner-up geometry. Combining class-conditional runner-up Mahalanobis distance with deep-tail spectral dispersion deficit yields $D_M > 14.0$ (threshold $\theta_M = 5.0$) on both `corrupt_*` and `stealth_*` spoofs while keeping intact specialists below threshold:
+  - Under **`stealth_2` (2/3 stealth decoy-spike attack)**, enabling `defense="mahalanobis"` flags the two stealth-corrupted specialists (`[True, True, False]`), replaces their posteriors with the neutral uniform baseline $1/10$, and **restores `tether`'s exact clean target prediction**.
+  - Under **`stealth_3` (3/3 total stealth spoof)**, where undefended 1D tail entropy fails to abstain ($\tau = 0.711 > 0.10$), `defense="mahalanobis"` flags all three specialists (`[True, True, True]`), collapses effective epistemic trust to $\tau_{\text{eff}} = 0.0$, and **triggers `100%` safe selective abstention (`abstain = True`, conformal set $\mathcal{C}_{0.95}(x) = \emptyset$)**.
+
+---
+
+## 9. Interpretation boundaries
 
 - **1-of-3 (`damage_one`), 2-of-3 (`damage_two`), and 3-of-3 (`damage_common`) corruption:** Under `damage_one` (1 of 3 specialists corrupted), both v0.1 and v0.2 intervention arms reach `~98.1%–98.3%` accuracy. Under `damage_two` (zero-shot 2-of-3 corruption, where corrupted specialists form a 2:1 majority), v0.1 collapses to `1.39%`, v0.2 `iit` reaches `80.76%`, and v0.2 `tether` reaches **`97.75%`** by combining dark-knowledge tail-entropy features with perturbation-localized specialist invariance. Under `damage_common` (all 3 specialists replaced by the same fabricated posterior), all visual information about the true digit is destroyed at the queried source, so accuracy drops to `0.83%` across all honest arms.
 - **Scope:** All results come from the 1,797-image `sklearn.datasets.load_digits` dataset with a fixed 60/20/20 image-identity split (`data_seed = 1729`) and synthetic posterior-level interventions. They do not establish writer-disjoint generalization, natural corruption robustness, or foundation-model behavior.

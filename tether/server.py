@@ -100,14 +100,26 @@ def make_server(study_dir: str | Path, host: str = "127.0.0.1",
             tamper_mode = str(data.get("tamper_mode", "clean"))
             if tamper_mode == "none":
                 tamper_mode = "clean"
-            if tamper_mode not in ("clean", "corrupt_1", "corrupt_2", "corrupt_3"):
-                raise ValueError("Tamper mode must be clean, corrupt_1, corrupt_2, or corrupt_3.")
+            valid_tampers = (
+                "clean", "corrupt_1", "corrupt_2", "corrupt_3",
+                "stealth_1", "stealth_2", "stealth_3",
+            )
+            if tamper_mode not in valid_tampers:
+                raise ValueError("Tamper mode must be clean, corrupt_1..3, or stealth_1..3.")
             corrupted_class = int(data.get("corrupted_class", 0))
             if not 0 <= corrupted_class <= 9:
                 raise ValueError("Corrupted class must be between 0 and 9.")
             confidence = float(data.get("confidence", 0.99))
             if not 0.5 <= confidence <= 0.999:
                 raise ValueError("Confidence must be between 0.5 and 0.999.")
+            alpha = float(data.get("alpha", 0.05))
+            if not 0.005 <= alpha <= 0.50:
+                raise ValueError("Alpha must be between 0.005 and 0.50.")
+            raw_def = data.get("defense", False)
+            if isinstance(raw_def, bool):
+                defense = raw_def
+            else:
+                defense = str(raw_def).strip().lower() in ("1", "true", "yes", "on", "mahalanobis")
             pixels = data.get("pixels")
             if pixels is not None:
                 if not isinstance(pixels, list) or len(pixels) != 64:
@@ -125,6 +137,8 @@ def make_server(study_dir: str | Path, host: str = "127.0.0.1",
                 "confidence": confidence,
                 "arm": arm,
                 "seed": seed,
+                "alpha": alpha,
+                "defense": defense,
             }
 
         def _parse_live_params(self, query: str) -> dict:
@@ -147,8 +161,8 @@ def make_server(study_dir: str | Path, host: str = "127.0.0.1",
             if path == "/api/example":
                 try:
                     values = parse_qs(parsed.query, keep_blank_values=True, strict_parsing=True)
-                    if set(values) - {"index", "arm", "mode", "seed"} or any(len(v) != 1 for v in values.values()):
-                        raise ValueError("Use one index, arm, mode and optional seed parameter only.")
+                    if set(values) - {"index", "arm", "mode", "seed", "alpha"} or any(len(v) != 1 for v in values.values()):
+                        raise ValueError("Use one index, arm, mode and optional seed/alpha parameter only.")
                     raw_index = values.get("index", ["0"])[0]
                     if not raw_index.isascii() or not raw_index.isdecimal():
                         raise ValueError("Example index must be a non-negative integer.")
@@ -163,6 +177,11 @@ def make_server(study_dir: str | Path, host: str = "127.0.0.1",
                         seed = int(raw_seed)
                         if seed >= 2**31:
                             raise ValueError("Seed exceeds the viewer limit.")
+                    alpha = 0.05
+                    if "alpha" in values:
+                        alpha = float(values["alpha"][0])
+                        if not 0.005 <= alpha <= 0.50:
+                            raise ValueError("Alpha must be between 0.005 and 0.50.")
                     arm = values.get("arm", ["tether"])[0]
                     mode = values.get("mode", ["factual"])[0]
                     if arm not in ARMS:
@@ -184,7 +203,7 @@ def make_server(study_dir: str | Path, host: str = "127.0.0.1",
                     # Restoring a checkpoint uses Torch's shared RNG context;
                     # serialize saved-model inspections across browser requests.
                     with INFERENCE_LOCK:
-                        payload = inspect_example(study, index, arm, mode, seed=seed)
+                        payload = inspect_example(study, index, arm, mode, seed=seed, alpha=alpha)
                     json.dumps(payload, allow_nan=False)
                 except FileNotFoundError as exc:
                     self._json(404, {"status": "missing", "error": str(exc)})
@@ -220,6 +239,61 @@ def make_server(study_dir: str | Path, host: str = "127.0.0.1",
                 else:
                     self._json(200, payload)
                 return
+            if path == "/api/live_arena":
+                summary = self._summary()
+                if summary is None:
+                    return
+                if summary.get("status") != "complete":
+                    self._json(409, {"status": "incomplete",
+                                     "error": "Live arena requires a completed saved study."})
+                    return
+                try:
+                    params = self._parse_live_params(parsed.query)
+                    params.pop("arm", None)
+                    from tether.experiment import live_arena
+                    with INFERENCE_LOCK:
+                        payload = live_arena(study, **params)
+                    json.dumps(payload, allow_nan=False)
+                except FileNotFoundError as exc:
+                    self._json(404, {"status": "missing", "error": str(exc)})
+                except (ValueError, IndexError, KeyError) as exc:
+                    self._json(400, {"status": "invalid", "error": str(exc)})
+                except (ImportError, OSError, RuntimeError, TypeError) as exc:
+                    self._json(503, {"status": "unavailable",
+                                     "error": f"Live arena is unavailable: {exc}"})
+                else:
+                    self._json(200, payload)
+                return
+            if path == "/api/conformal":
+                summary = self._summary()
+                if summary is None:
+                    return
+                if summary.get("status") != "complete":
+                    self._json(409, {"status": "incomplete",
+                                     "error": "Conformal evaluation requires a completed saved study."})
+                    return
+                try:
+                    raw = parse_qs(parsed.query, keep_blank_values=True, strict_parsing=True) if parsed.query else {}
+                    if set(raw) - {"alpha", "seed"} or any(len(v) != 1 for v in raw.values()):
+                        raise ValueError("Use optional alpha and seed parameters only.")
+                    alpha = float(raw.get("alpha", ["0.05"])[0])
+                    if not 0.005 <= alpha <= 0.50:
+                        raise ValueError("Alpha must be between 0.005 and 0.50.")
+                    seed = int(raw["seed"][0]) if "seed" in raw and raw["seed"][0] else None
+                    from tether.experiment import calibrate_study
+                    with INFERENCE_LOCK:
+                        payload = calibrate_study(study, alpha=alpha, seed=seed)
+                    json.dumps(payload, allow_nan=False)
+                except FileNotFoundError as exc:
+                    self._json(404, {"status": "missing", "error": str(exc)})
+                except (ValueError, IndexError, KeyError) as exc:
+                    self._json(400, {"status": "invalid", "error": str(exc)})
+                except (ImportError, OSError, RuntimeError, TypeError) as exc:
+                    self._json(503, {"status": "unavailable",
+                                     "error": f"Conformal evaluation is unavailable: {exc}"})
+                else:
+                    self._json(200, payload)
+                return
             filename = ASSETS.get(path)
             if filename is None:
                 self._json(404, {"status": "missing", "error": "Unknown local viewer resource."})
@@ -233,7 +307,7 @@ def make_server(study_dir: str | Path, host: str = "127.0.0.1",
         def do_POST(self):
             parsed = urlsplit(self.path)
             path = unquote(parsed.path)
-            if path == "/api/live_predict":
+            if path in ("/api/live_predict", "/api/live_arena"):
                 summary = self._summary()
                 if summary is None:
                     return
@@ -255,9 +329,14 @@ def make_server(study_dir: str | Path, host: str = "127.0.0.1",
                     if not isinstance(data, dict):
                         raise ValueError("Payload must be a JSON object.")
                     params = self._validate_live_params(data)
-                    from tether.experiment import live_predict
                     with INFERENCE_LOCK:
-                        payload = live_predict(study, **params)
+                        if path == "/api/live_arena":
+                            params.pop("arm", None)
+                            from tether.experiment import live_arena
+                            payload = live_arena(study, **params)
+                        else:
+                            from tether.experiment import live_predict
+                            payload = live_predict(study, **params)
                     json.dumps(payload, allow_nan=False)
                 except json.JSONDecodeError:
                     self._json(400, {"status": "invalid", "error": "Malformed JSON body."})

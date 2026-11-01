@@ -24,12 +24,24 @@ function mean(values) { const kept = values.filter(finite); return kept.length ?
 function percentage(value) { return finite(value) ? (100 * value).toFixed(1) + "%" : "—"; }
 function points(value) { return finite(value) ? (value >= 0 ? "+" : "") + (100*value).toFixed(1) + " pp" : "—"; }
 function human(value) { return String(value ?? "").replaceAll("_", " ").replaceAll("-", " "); }
-function errorNotice(id, message) { const node=byId(id); node.textContent=message || ""; node.classList.toggle("hidden", !message); }
+function errorNotice(id, message) { const node=byId(id); if(node){node.textContent=message || ""; node.classList.toggle("hidden", !message);} }
 async function api(path) {
   const response = await fetch(path, {cache:"no-store"});
   const data = await response.json();
   if (!response.ok) throw new Error(data.error || "Saved study could not be loaded.");
   return data;
+}
+function renderConformalChips(container, setArr, abstain, topPred) {
+  if (!container) return;
+  container.replaceChildren();
+  if (abstain || !Array.isArray(setArr) || setArr.length === 0) {
+    container.append(element("span", "∅ Empty Set (Epistemic Abstention)", "conformal-chip empty"));
+    return;
+  }
+  setArr.forEach((d, idx) => {
+    const chip = element("span", "Digit " + d, "conformal-chip" + (d === topPred || idx === 0 ? " primary" : ""));
+    container.append(chip);
+  });
 }
 function metricsFor(arm, condition) {
   return (study?.rows || []).filter(row => row.arm === arm).map(row => row.metrics?.[condition]).filter(Boolean);
@@ -94,7 +106,7 @@ async function loadStudy() {
     byId("study-status").classList.toggle("unavailable",!complete);
     const config=study.config || {};
     const proto=config.protocol || "v1";
-    if(byId("protocol-version")) byId("protocol-version").textContent=proto==="v2"?"v0.2":"v0.1";
+    if(byId("protocol-version")) byId("protocol-version").textContent="v0.4 ("+proto+")";
     byId("study-config").textContent=study.rows.length+" arm records · "+human(config.phase||config.stage||"saved evaluation")+" ("+proto+")";
     const seeds=[...new Set(study.rows.map(x=>x.seed))].sort((a,b)=>a-b);
     const seedSelect=byId("seed-select");
@@ -183,14 +195,21 @@ function renderExample(data) {
     byId("correctness").textContent="SAFE ABSTAIN";
     byId("correctness").className="tag wrong";
   }
+  renderConformalChips(byId("inspector-conformal-set"), data.conformal_set, isAbstain, data.prediction);
+  if(byId("inspector-conformal-meta") && finite(data.temperature) && finite(data.conformal_q_hat)){
+    byId("inspector-conformal-meta").textContent="T* = "+data.temperature.toFixed(2)+" · q̂ = "+data.conformal_q_hat.toFixed(3);
+  }
   const trustVal=Number(data.epistemic_trust??0);
   if(byId("inspector-trust-val")) byId("inspector-trust-val").textContent=percentage(trustVal);
   if(byId("inspector-meter-fill")) byId("inspector-meter-fill").style.width=Math.max(0,Math.min(100,trustVal*100))+"%";
   if(byId("inspector-meter-val")) byId("inspector-meter-val").textContent="τ = "+trustVal.toFixed(3);
+  if(byId("inspector-ig-err") && finite(data.ig_completeness_error)){
+    byId("inspector-ig-err").textContent="Completeness Δ = "+data.ig_completeness_error.toFixed(4);
+  }
   const insSal=byId("inspector-saliency");
   if(insSal){
     insSal.replaceChildren();
-    const expSal=data.expert_saliency?.[source]||[0,0,0];
+    const expSal=(data.ig_expert_saliency||data.expert_saliency)?.[source]||[0,0,0];
     const maxSal=Math.max(0.0001,...expSal);
     ["Expert A","Expert B","Expert C"].forEach((name,j)=>{
       const sVal=expSal[j]||0;
@@ -200,6 +219,52 @@ function renderExample(data) {
       fill.style.width=Math.min(100,(sVal/maxSal)*100)+"%";
       track.append(fill);row.append(track,element("span",sVal.toFixed(3),"saliency-val"));
       insSal.append(row);
+    });
+  }
+  const insShapley=byId("inspector-shapley");
+  if(insShapley && Array.isArray(data.shapley_values)){
+    insShapley.replaceChildren();
+    const phis=data.shapley_values;
+    const maxAbs=Math.max(0.0001,...phis.map(x=>Math.abs(Number(x)||0)));
+    if(byId("inspector-shapley-err") && finite(data.shapley_efficiency_error)){
+      byId("inspector-shapley-err").textContent="Σφ = "+(phis.reduce((a,b)=>a+b,0)).toFixed(2);
+    }
+    ["Expert A (φ₀)","Expert B (φ₁)","Expert C (φ₂)"].forEach((name,j)=>{
+      const val=Number(phis[j]||0);
+      const row=element("div",undefined,"saliency-row");
+      row.style.gridTemplateColumns="72px minmax(20px,1fr) 52px";
+      row.append(element("span",name));
+      const track=element("div",undefined,"saliency-track"), fill=element("div",undefined,"saliency-fill");
+      fill.style.width=Math.min(100,(Math.abs(val)/maxAbs)*100)+"%";
+      fill.style.background=val>=0?"#578776":"#c0392b";
+      track.append(fill);row.append(track,element("span",(val>=0?"+":"")+val.toFixed(2),"saliency-val"));
+      insShapley.append(row);
+    });
+  }
+  const patchBox=byId("inspector-patching");
+  if(patchBox && data.interchange_patching){
+    patchBox.replaceChildren();
+    const nodeLabels={
+      expert_weights:"Reliability Gate",
+      source_posteriors:"Source Posteriors",
+      source_weights:"Source Router",
+      pooled_posterior:"Pooled State",
+      task_logits:"Task Logits",
+      shortcut_logits:"Shortcut Logits"
+    };
+    Object.entries(nodeLabels).forEach(([key,label])=>{
+      const info=data.interchange_patching[key];
+      if(!info)return;
+      const rest=Math.max(0,Math.min(1,Number(info.restoration)||0));
+      const row=element("div",undefined,"saliency-row");
+      row.style.gridTemplateColumns="105px minmax(20px,1fr) 70px";
+      row.append(element("span",label));
+      const track=element("div",undefined,"saliency-track"), fill=element("div",undefined,"saliency-fill");
+      fill.style.width=(rest*100)+"%";
+      fill.style.background=rest>0.5?"#578776":"#b5c9c0";
+      track.append(fill);
+      row.append(track,element("span","ŷ="+info.prediction+" ("+Math.round(rest*100)+"%)","saliency-val"));
+      patchBox.append(row);
     });
   }
   byId("mode-description").textContent=modes[mode];
@@ -230,7 +295,7 @@ async function loadExample() {
 byId("condition-select").addEventListener("change",renderCondition);
 if(byId("metric-select")) byId("metric-select").addEventListener("change",renderCondition);
 byId("arm-select").addEventListener("change",loadExample);
-if(byId("seed-select")) byId("seed-select").addEventListener("change",loadExample);
+if(byId("seed-select")) byId("seed-select").addEventListener("change",()=>{loadExample();scheduleLivePredict();});
 byId("example-index").addEventListener("change",loadExample);
 byId("previous-example").addEventListener("click",()=>{byId("example-index").value=Math.max(0,Number(byId("example-index").value)-1);loadExample();});
 byId("next-example").addEventListener("click",()=>{byId("example-index").value=Math.min(1000000,Number(byId("example-index").value)+1);loadExample();});
@@ -243,6 +308,10 @@ document.querySelectorAll(".nav-item").forEach(link=>link.addEventListener("clic
 document.querySelectorAll(".source-tile canvas").forEach(canvas=>drawDigit(canvas,null));
 
 let pgPixels=new Float32Array(64), pgDigit=3, pgTamper="clean", pgIsDrawing=false, pgDebounceTimer=null;
+function pgGetAlpha(){
+  const cov=Number(byId("pg-coverage")?.value||0.95);
+  return Math.max(0.01,Math.min(0.20,1.0-cov));
+}
 function pgInitCanvas(){
   const canvas=byId("pg-canvas");if(!canvas)return;
   const ctx=canvas.getContext("2d");
@@ -275,6 +344,13 @@ function pgInitCanvas(){
   canvas.addEventListener("touchmove",(e)=>{if(pgIsDrawing){paint(e);e.preventDefault();}},{passive:false});
   byId("pg-clear")?.addEventListener("click",()=>{pgPixels.fill(0);redraw();scheduleLivePredict();});
   byId("pg-invert")?.addEventListener("click",()=>{for(let i=0;i<64;i++)pgPixels[i]=Math.max(0,1.0-pgPixels[i]);redraw();scheduleLivePredict();});
+  byId("pg-noise")?.addEventListener("click",()=>{
+    for(let i=0;i<64;i++){
+      const delta=(Math.sin(i*12.9898+pgPixels[i]*78.233)*43758.5453)%1;
+      pgPixels[i]=Math.max(0,Math.min(1,pgPixels[i]*0.82+Math.abs(delta)*0.28));
+    }
+    redraw();scheduleLivePredict();
+  });
   document.querySelectorAll(".digit-btn").forEach(btn=>{
     btn.addEventListener("click",()=>{
       document.querySelectorAll(".digit-btn").forEach(b=>b.classList.remove("active"));
@@ -296,7 +372,13 @@ function pgInitCanvas(){
     byId("pg-conf-val").textContent=(Number(e.target.value)*100).toFixed(1)+"%";
     scheduleLivePredict();
   });
-  ["pg-arm-select","pg-source-select","pg-op-select","pg-corrupt-class"].forEach(id=>{
+  byId("pg-coverage")?.addEventListener("input",(e)=>{
+    const cov=Number(e.target.value);
+    byId("pg-cov-val").textContent=Math.round(cov*100)+"%";
+    if(byId("pg-conformal-label")) byId("pg-conformal-label").innerHTML="SPLIT CONFORMAL SET C<sub>"+cov.toFixed(2)+"</sub>(x)";
+    scheduleLivePredict();
+  });
+  ["pg-arm-select","pg-source-select","pg-op-select","pg-corrupt-class","pg-defense"].forEach(id=>{
     byId(id)?.addEventListener("change",scheduleLivePredict);
   });
   window.pgRedrawCanvas=redraw;
@@ -311,7 +393,9 @@ async function loadPresetDigit(digit){
       source:byId("pg-source-select")?.value||"0",
       operation:byId("pg-op-select")?.value||"0",
       tamper_mode:pgTamper,
-      arm:byId("pg-arm-select")?.value||"tether"
+      arm:byId("pg-arm-select")?.value||"tether",
+      alpha:String(pgGetAlpha().toFixed(3)),
+      defense:byId("pg-defense")?.checked?"1":"0"
     });
     if(seedVal)params.append("seed",seedVal);
     const res=await api("/api/live_predict?"+params);
@@ -321,6 +405,7 @@ async function loadPresetDigit(digit){
       if(window.pgRedrawCanvas)window.pgRedrawCanvas();
     }
     renderLiveOutput(res);
+    await runLiveArena();
   }catch(e){errorNotice("pg-error",e.message);}
 }
 async function runLivePredict(){
@@ -333,25 +418,62 @@ async function runLivePredict(){
     tamper_mode:pgTamper,
     corrupted_class:Number(byId("pg-corrupt-class")?.value||4),
     confidence:Number(byId("pg-confidence")?.value||0.99),
-    arm:byId("pg-arm-select")?.value||"tether"
+    arm:byId("pg-arm-select")?.value||"tether",
+    alpha:Number(pgGetAlpha().toFixed(3)),
+    defense:Boolean(byId("pg-defense")?.checked)
   };
   const seedVal=byId("seed-select")?.value;
   if(seedVal)body.seed=Number(seedVal);
   byId("pg-status").textContent="Running live inference…";
   try{
-    const response=await fetch("/api/live_predict",{
-      method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify(body),cache:"no-store"
-    });
-    const data=await response.json();
-    if(!response.ok)throw new Error(data.error||"Inference error");
+    const [predRes, arenaRes] = await Promise.all([
+      fetch("/api/live_predict",{
+        method:"POST",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify(body),cache:"no-store"
+      }),
+      fetch("/api/live_arena",{
+        method:"POST",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify(body),cache:"no-store"
+      })
+    ]);
+    const data=await predRes.json();
+    if(!predRes.ok)throw new Error(data.error||"Inference error");
     renderLiveOutput(data);
+    if(arenaRes.ok){
+      const arenaData=await arenaRes.json();
+      renderLiveArena(arenaData);
+    }
     byId("pg-status").textContent="Ready · "+(armNames[body.arm]||body.arm);
     errorNotice("pg-error","");
   }catch(err){
     byId("pg-status").textContent="Inference error";
     errorNotice("pg-error",err.message);
   }
+}
+async function runLiveArena(){
+  if(!study||study.status!=="complete")return;
+  const body={
+    pixels:Array.from(pgPixels),
+    digit:pgDigit,
+    source:Number(byId("pg-source-select")?.value||0),
+    operation:Number(byId("pg-op-select")?.value||0),
+    tamper_mode:pgTamper,
+    corrupted_class:Number(byId("pg-corrupt-class")?.value||4),
+    confidence:Number(byId("pg-confidence")?.value||0.99),
+    alpha:Number(pgGetAlpha().toFixed(3)),
+    defense:Boolean(byId("pg-defense")?.checked)
+  };
+  const seedVal=byId("seed-select")?.value;
+  if(seedVal)body.seed=Number(seedVal);
+  try{
+    const res=await fetch("/api/live_arena",{
+      method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify(body),cache:"no-store"
+    });
+    if(res.ok){
+      renderLiveArena(await res.json());
+    }
+  }catch(_){}
 }
 function renderLiveOutput(data){
   const isAbstain=Boolean(data.abstain);
@@ -360,6 +482,10 @@ function renderLiveOutput(data){
   byId("pg-decision-badge").textContent=isAbstain?"SAFE ABSTAIN":"TRUSTED";
   byId("pg-decision-badge").className="tag "+(isAbstain?"wrong":"safe");
   byId("pg-abstain-banner")?.classList.toggle("hidden",!isAbstain);
+  renderConformalChips(byId("pg-conformal-set"), data.conformal_set, isAbstain, data.prediction);
+  if(byId("pg-conformal-meta") && finite(data.temperature) && finite(data.conformal_q_hat)){
+    byId("pg-conformal-meta").textContent="T* = "+data.temperature.toFixed(2)+" · q̂ = "+data.conformal_q_hat.toFixed(3);
+  }
   const trust=Number(data.epistemic_trust??0);
   byId("pg-trust-percent").textContent=percentage(trust);
   byId("pg-meter-fill").style.width=Math.max(0,Math.min(100,trust*100))+"%";
@@ -372,9 +498,32 @@ function renderLiveOutput(data){
     fill.style.height=(finite(val)?Math.max(2,Math.min(75,val*75)):2)+"px";
     col.title="Digit "+i+": "+percentage(val);col.append(fill,element("span",String(i)));probChart.append(col);
   }
+  const uncBars=byId("pg-uncertainty-bars");
+  if(uncBars){
+    uncBars.replaceChildren();
+    const items=[
+      ["Aleatoric Entropy", Number(data.aleatoric_uncertainty||0), "#578776"],
+      ["Conflict (JSD)", Number(data.epistemic_conflict_jsd||0), "#ce874a"],
+      ["Forensic Spoof (1−τ)", Number(data.forensic_spoof_risk||0), "#c0392b"]
+    ];
+    items.forEach(([label,val,color])=>{
+      const row=element("div",undefined,"saliency-row");
+      row.style.gridTemplateColumns="110px minmax(20px,1fr) 48px";
+      row.append(element("span",label));
+      const track=element("div",undefined,"saliency-track"), fill=element("div",undefined,"saliency-fill");
+      fill.style.width=Math.max(0,Math.min(100,val*100))+"%";
+      fill.style.background=color;
+      track.append(fill);
+      row.append(track,element("span",percentage(val),"saliency-val"));
+      uncBars.append(row);
+    });
+  }
   const src=Number(data.source||0);
-  const expSal=data.expert_saliency?.[src]||[0,0,0];
+  const expSal=(data.ig_expert_saliency||data.expert_saliency)?.[src]||[0,0,0];
   const maxSal=Math.max(0.0001,...expSal);
+  if(byId("pg-ig-err") && finite(data.ig_completeness_error)){
+    byId("pg-ig-err").textContent="Δ = "+data.ig_completeness_error.toFixed(4);
+  }
   const salContainer=byId("pg-saliency-breakdown");salContainer.replaceChildren();
   ["Expert A","Expert B","Expert C"].forEach((name,j)=>{
     const sVal=expSal[j]||0, row=element("div",undefined,"saliency-row");
@@ -384,16 +533,96 @@ function renderLiveOutput(data){
     track.append(fill);row.append(track,element("span",sVal.toFixed(3),"saliency-val"));
     salContainer.append(row);
   });
+  const pgShapley=byId("pg-shapley-breakdown");
+  if(pgShapley && Array.isArray(data.shapley_values)){
+    pgShapley.replaceChildren();
+    const phis=data.shapley_values;
+    const maxPhi=Math.max(0.0001,...phis.map(x=>Math.abs(Number(x)||0)));
+    if(byId("pg-shapley-meta")){
+      byId("pg-shapley-meta").textContent="Σφ = "+(phis.reduce((a,b)=>a+b,0)).toFixed(2);
+    }
+    ["Expert A (φ₀)","Expert B (φ₁)","Expert C (φ₂)"].forEach((name,j)=>{
+      const val=Number(phis[j]||0), row=element("div",undefined,"saliency-row");
+      row.style.gridTemplateColumns="72px minmax(20px,1fr) 52px";
+      row.append(element("span",name));
+      const track=element("div",undefined,"saliency-track"), fill=element("div",undefined,"saliency-fill");
+      fill.style.width=Math.min(100,(Math.abs(val)/maxPhi)*100)+"%";
+      fill.style.background=val>=0?"#578776":"#c0392b";
+      track.append(fill);row.append(track,element("span",(val>=0?"+":"")+val.toFixed(2),"saliency-val"));
+      pgShapley.append(row);
+    });
+  }
   const damagedSet=new Set(Array.isArray(data.damaged_experts)?data.damaged_experts:[]);
-  byId("pg-damaged-notice").textContent=damagedSet.size?(damagedSet.size+" Corrupted"):"3 Intact";
+  byId("pg-damaged-notice").textContent=damagedSet.size?(damagedSet.size+" Corrupted"+(data.defense?" · Sanitized":"")):"3 Intact";
   const pills=byId("pg-trust-pills");pills.replaceChildren();
   for(let j=0;j<3;j++){
-    const tVal=data.trust_score?.[src]?.[j], isDmg=damagedSet.has(j);
+    const tVal=data.trust_score?.[src]?.[j], wVal=data.expert_weights?.[src]?.[j], mDist=data.mahalanobis_distance?.[j], isDmg=damagedSet.has(j);
     const pill=element("div",undefined,"trust-pill"+(isDmg?" damaged":""));
-    pill.append(element("strong","Expert "+["A","B","C"][j]+(isDmg?" (corrupted)":"")),element("span","Trust "+percentage(tVal)));
+    const mStr=finite(mDist)?" · Dₘ "+mDist.toFixed(1):"";
+    pill.append(element("strong","Expert "+["A","B","C"][j]+(isDmg?" (corrupted)":"")),element("span","τ "+percentage(tVal)+mStr+" · Wt "+percentage(wVal)));
     pills.append(pill);
+  }
+}
+function renderLiveArena(arena){
+  if(!arena||!Array.isArray(arena.arms))return;
+  if(byId("arena-target-badge")){
+    byId("arena-target-badge").textContent="CLEAN TARGET: "+arena.expected_target+" (DIGIT "+arena.clean_digit+")";
+  }
+  const tbody=byId("arena-tbody");
+  if(tbody){
+    tbody.replaceChildren();
+    const order=["tether","invariance_only","iit","effect_only","dropout","passive","unpaired"];
+    const sorted=[...arena.arms].sort((a,b)=>order.indexOf(a.arm)-order.indexOf(b.arm));
+    sorted.forEach(item=>{
+      const tr=element("tr",undefined,item.arm==="tether"?"row-tether":"");
+      tr.append(element("th",armNames[item.arm]||item.arm));
+      const predText=item.abstain?"∅ (Abstain)":"ŷ = "+item.prediction;
+      tr.append(element("td",predText));
+      const setStr=item.abstain||!item.conformal_set?.length?"∅":"{"+item.conformal_set.join(", ")+"}";
+      tr.append(element("td",setStr));
+      tr.append(element("td",percentage(item.target_probability)));
+      tr.append(element("td",percentage(item.intact_weight_share)));
+      const tdStatus=element("td");
+      const badge=element("span",item.abstain?"SAFE ABSTAIN":(item.survived?"SURVIVED":"HIJACKED"),"tag "+(item.survived?"safe":"danger"));
+      tdStatus.append(badge);
+      tr.append(tdStatus);
+      tbody.append(tr);
+    });
+  }
+  const svg=byId("arena-sweep-svg");
+  if(svg && arena.sweep && arena.sweep.curves){
+    const confs=arena.sweep.confidences||[];
+    const curves=arena.sweep.curves;
+    if(byId("arena-sweep-tag")){
+      byId("arena-sweep-tag").textContent=human(arena.sweep.mode).toUpperCase()+" SWEEP";
+    }
+    const w=380, h=210, padL=38, padR=16, padT=16, padB=28;
+    const plotW=w-padL-padR, plotH=h-padT-padB;
+    const xPos=(idx)=>padL+(confs.length>1?(idx/(confs.length-1))*plotW:plotW/2);
+    const yPos=(val)=>padT+(1-Math.max(0,Math.min(1,val)))*plotH;
+    let markup=`<rect x="${padL}" y="${padT}" width="${plotW}" height="${plotH}" fill="#fff" stroke="#e6e7e3" rx="4"/>`;
+    [0,0.5,1.0].forEach(tick=>{
+      const y=yPos(tick);
+      markup+=`<line x1="${padL}" y1="${y}" x2="${w-padR}" y2="${y}" stroke="#f0f0ec" stroke-dasharray="3,3"/>`;
+      markup+=`<text x="${padL-6}" y="${y+3}" text-anchor="end" font-size="8" fill="#8c9097">${Math.round(tick*100)}%</text>`;
+    });
+    confs.forEach((c,idx)=>{
+      const x=xPos(idx);
+      markup+=`<text x="${x}" y="${h-8}" text-anchor="middle" font-size="8" fill="#8c9097">${(c*100).toFixed(0)}%</text>`;
+    });
+    const colors={tether:"#7358cf",iit:"#578776",unpaired:"#ce874a",passive:"#95a5a6"};
+    ["passive","unpaired","iit","tether"].forEach(armKey=>{
+      const series=curves[armKey]?.target_probabilities;
+      if(!Array.isArray(series)||!series.length)return;
+      const pts=series.map((v,i)=>`${xPos(i).toFixed(1)},${yPos(v).toFixed(1)}`).join(" ");
+      const strokeW=armKey==="tether"?2.6:1.7;
+      markup+=`<polyline fill="none" stroke="${colors[armKey]}" stroke-width="${strokeW}" points="${pts}"/>`;
+      series.forEach((v,i)=>{
+        markup+=`<circle cx="${xPos(i).toFixed(1)}" cy="${yPos(v).toFixed(1)}" r="${armKey==="tether"?3.2:2.2}" fill="${colors[armKey]}"/>`;
+      });
+    });
+    svg.innerHTML=markup;
   }
 }
 
 loadStudy().then(()=>pgInitCanvas());
-

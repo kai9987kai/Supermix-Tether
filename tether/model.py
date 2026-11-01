@@ -135,6 +135,14 @@ class TetherReceiver(nn.Module):
         epistemic_abstain = (queried_trust < self.epistemic_threshold) if self.forensic else torch.zeros_like(queried_trust, dtype=torch.bool)
         predictions = logits.argmax(-1)
         selective_predictions = torch.where(epistemic_abstain, torch.full_like(predictions, -1), predictions)
+        consensus_sq = consensus.squeeze(2)
+        consensus_entropy = -(consensus_sq * consensus_sq.clamp_min(1e-8).log()).sum(-1) / math.log(10)
+        mean_expert_entropy = entropy.squeeze(-1).mean(-1)
+        conflict_jsd = (consensus_entropy - mean_expert_entropy).clamp(0.0, 1.0)
+        aleatoric = (expert_weights * entropy.squeeze(-1)).sum(-1).clamp(0.0, 1.0)
+        queried_aleatoric = aleatoric[rows, queried_sources]
+        queried_conflict = conflict_jsd[rows, queried_sources]
+        forensic_spoof = (1.0 - queried_trust).clamp(0.0, 1.0)
         return {
             "logits": logits,
             "source_weights": source_weights,
@@ -147,6 +155,11 @@ class TetherReceiver(nn.Module):
             "tail_entropy": tail_entropy.squeeze(-1),
             "trust_score": trust_scores,
             "epistemic_trust": queried_trust,
+            "aleatoric_uncertainty": aleatoric,
+            "queried_aleatoric": queried_aleatoric,
+            "epistemic_conflict_jsd": conflict_jsd,
+            "queried_conflict_jsd": queried_conflict,
+            "forensic_spoof_risk": forensic_spoof,
             "abstain": epistemic_abstain,
             "selective_prediction": selective_predictions,
             "task_logits": transformed,
@@ -187,6 +200,246 @@ class TetherReceiver(nn.Module):
             "gradients": grads.detach(),
             "logits": logits.detach(),
             "target": chosen_target,
+        }
+
+    def integrated_gradients(self, donors, query, context, target=None, steps: int = 128):
+        """Axiomatic Integrated Gradients (Sundararajan et al., 2017) from uniform donor baseline."""
+        _inputs(donors, query, context)
+        if donors.device != self.task_matrices.device:
+            raise ValueError("input tensors and receiver must be on the same device")
+        if not isinstance(steps, int) or isinstance(steps, bool) or steps < 2 or steps > 256:
+            raise ValueError("steps must be an integer in [2, 256]")
+        dtype = self.task_matrices.dtype
+        n = donors.shape[0]
+        p = donors.detach().to(dtype=dtype)
+        baseline = torch.full_like(p, 0.1)
+        with torch.no_grad():
+            full_detail = self._compute(p, query, context)
+            base_detail = self._compute(baseline, query, context)
+            logits = full_detail["logits"]
+            base_logits = base_detail["logits"]
+        if target is None:
+            chosen_target = logits.argmax(dim=-1)
+        else:
+            _target(target, "target", n, donors.device)
+            chosen_target = target
+        # Quartic boundary-layer quadrature in u = 1 - alpha avoids float32 cancellation near alpha -> 1
+        t_edges = torch.linspace(0.0, 1.0, steps + 1, device=p.device, dtype=torch.float64)
+        u_edges = (1.0 - t_edges).pow(4)
+        u_mid = (0.5 * (u_edges[:-1] + u_edges[1:])).to(dtype=dtype)
+        weights = (u_edges[:-1] - u_edges[1:]).to(dtype=dtype)
+        delta_p = p - baseline
+        # Positive convex combination (1 - u)*p + u*baseline preserves full float32 tail precision
+        interp = ((1.0 - u_mid)[:, None, None, None, None] * p.unsqueeze(0)
+                  + u_mid[:, None, None, None, None] * baseline.unsqueeze(0)).reshape(steps * n, 3, 3, 10)
+        interp.requires_grad_(True)
+        q_rep = query.unsqueeze(0).expand(steps, -1, -1).reshape(steps * n, 2)
+        c_rep = context.to(dtype=dtype).unsqueeze(0).expand(steps, -1, -1).reshape(steps * n, 10)
+        t_rep = chosen_target.unsqueeze(0).expand(steps, -1).reshape(steps * n)
+        interp_logits = self._compute(interp, q_rep, c_rep, detach_donors=False)["logits"]
+        score = interp_logits.gather(1, t_rep.unsqueeze(-1)).sum()
+        grad_out = torch.autograd.grad(score, interp, allow_unused=True, create_graph=False)[0]
+        grads = torch.zeros_like(interp) if grad_out is None else grad_out
+        avg_grads = (grads.detach().reshape(steps, n, 3, 3, 10) * weights[:, None, None, None, None]).sum(dim=0)
+        attributions = delta_p * avg_grads
+        saliency = attributions.abs()
+        source_saliency = saliency.sum(dim=(-1, -2))
+        expert_saliency = saliency.sum(dim=-1)
+        source_net = attributions.sum(dim=(-1, -2))
+        expert_net = attributions.sum(dim=-1)
+        rows = torch.arange(n, device=p.device)
+        target_delta = logits[rows, chosen_target] - base_logits[rows, chosen_target]
+        attribution_sum = attributions.sum(dim=(-1, -2, -3))
+        completeness_error = (attribution_sum - target_delta).abs()
+        return {
+            "attributions": attributions,
+            "saliency": saliency,
+            "source_saliency": source_saliency,
+            "expert_saliency": expert_saliency,
+            "source_net_contribution": source_net,
+            "expert_net_contribution": expert_net,
+            "baseline_logits": base_logits,
+            "logits": logits,
+            "target": chosen_target,
+            "target_delta": target_delta,
+            "attribution_sum": attribution_sum,
+            "completeness_error": completeness_error,
+        }
+
+    @torch.no_grad()
+    def interchange_intervention(self, base_donors, base_query, base_context,
+                                 cf_donors, cf_query=None, cf_context=None, target=None):
+        """Causal Abstraction Interchange Intervention (activation patching) across internal nodes."""
+        _inputs(base_donors, base_query, base_context)
+        if cf_query is None:
+            cf_query = base_query
+        if cf_context is None:
+            cf_context = base_context
+        _inputs(cf_donors, cf_query, cf_context)
+        if base_donors.shape[0] != cf_donors.shape[0]:
+            raise ValueError("base and counterfactual inputs must have the same batch size")
+        if base_donors.device != self.task_matrices.device or cf_donors.device != self.task_matrices.device:
+            raise ValueError("input tensors and receiver must be on the same device")
+        n = base_donors.shape[0]
+        dtype = self.task_matrices.dtype
+        p_base = base_donors.detach().to(dtype=dtype)
+        base = self._compute(p_base, base_query, base_context)
+        cf = self._compute(cf_donors, cf_query, cf_context)
+        if target is None:
+            chosen_target = cf["logits"].argmax(dim=-1)
+        else:
+            _target(target, "target", n, base_donors.device)
+            chosen_target = target
+        rows = torch.arange(n, device=base_donors.device)
+        base_prob = base["logits"].softmax(-1)
+        cf_prob = cf["logits"].softmax(-1)
+        base_target_logit = base["logits"][rows, chosen_target]
+        cf_target_logit = cf["logits"][rows, chosen_target]
+        logit_gap = cf_target_logit - base_target_logit
+        denom = torch.where(logit_gap >= 0, logit_gap.clamp_min(1e-5), logit_gap.clamp_max(-1e-5))
+
+        nodes = ("expert_weights", "source_posteriors", "source_weights",
+                 "pooled_posterior", "task_logits", "shortcut_logits")
+        patches = {}
+        for node in nodes:
+            ew = cf["expert_weights"] if node == "expert_weights" else base["expert_weights"]
+            if node == "source_posteriors":
+                sp = cf["source_posteriors"]
+            elif node == "expert_weights":
+                sp = (ew[..., None] * p_base).sum(2)
+            else:
+                sp = base["source_posteriors"]
+            sw = cf["source_weights"] if node == "source_weights" else base["source_weights"]
+            if node == "pooled_posterior":
+                pooled = cf["pooled_posterior"]
+            elif node in ("expert_weights", "source_posteriors", "source_weights"):
+                pooled = (sw[..., None] * sp).sum(1)
+            else:
+                pooled = base["pooled_posterior"]
+            if node == "task_logits":
+                task_l = cf["task_logits"]
+            elif node in ("expert_weights", "source_posteriors", "source_weights", "pooled_posterior"):
+                task_l = torch.einsum("bi,bij->bj", pooled, self.task_matrices[base_query[:, 1]]) + self.task_bias[base_query[:, 1]]
+            else:
+                task_l = base["task_logits"]
+            short_l = cf["shortcut_logits"] if node == "shortcut_logits" else base["shortcut_logits"]
+            patched_logits = task_l + short_l
+            patched_prob = patched_logits.softmax(-1)
+            patched_target_logit = patched_logits[rows, chosen_target]
+            restoration = ((patched_target_logit - base_target_logit) / denom).clamp(-1.0, 2.0)
+            prob_shift = patched_prob[rows, chosen_target] - base_prob[rows, chosen_target]
+            kl_to_cf = (cf_prob * (cf_prob.clamp_min(1e-8).log() - patched_prob.clamp_min(1e-8).log())).sum(-1).clamp_min(0.0)
+            patches[node] = {
+                "logits": patched_logits,
+                "probabilities": patched_prob,
+                "prediction": patched_logits.argmax(-1),
+                "restoration": restoration,
+                "prob_shift": prob_shift,
+                "kl_to_cf": kl_to_cf,
+            }
+        return {
+            "target": chosen_target,
+            "base_logits": base["logits"],
+            "cf_logits": cf["logits"],
+            "base_prediction": base["logits"].argmax(-1),
+            "cf_prediction": cf["logits"].argmax(-1),
+            "patches": patches,
+        }
+
+    @torch.no_grad()
+    def shapley_interactions(self, donors, query, context, target=None):
+        """Exact Cooperative Game-Theoretic Specialist Shapley Values & Shapley-Taylor Interactions.
+
+        Evaluates all 2^3 = 8 specialist coalitions on the queried source relative to
+        the maximum-entropy uniform baseline (0.1) in a single batched pass, returning:
+        - Exact Shapley values phi_e (Lundberg & Lee, NeurIPS 2017)
+        - Exact Harsanyi / Mobius coalition dividends (d_0, d_1, d_2, d_01, d_02, d_12, d_012)
+        - Exact Order-2 Shapley-Taylor Interaction Matrix I^(2)_{i,j} (Sundararajan et al., ICML 2020)
+        where sum_{i,j} I^(2)_{i,j} == sum_e phi_e == v({0,1,2}) - v(empty) exactly.
+        """
+        _inputs(donors, query, context)
+        if donors.device != self.task_matrices.device:
+            raise ValueError("input tensors and receiver must be on the same device")
+        n = donors.shape[0]
+        dtype = self.task_matrices.dtype
+        p = donors.detach().to(dtype=dtype)
+        full_detail = self._compute(p, query, context)
+        logits = full_detail["logits"]
+        if target is None:
+            chosen_target = logits.argmax(dim=-1)
+        else:
+            _target(target, "target", n, donors.device)
+            chosen_target = target
+
+        uniform = torch.full_like(p, 0.1)
+        rows = torch.arange(n, device=p.device)
+        q_src = query[:, 0]
+
+        # Build all 8 coalitions [8, n, 3, 3, 10] where absent specialists on queried source are 0.1
+        coalition_inputs = p.unsqueeze(0).expand(8, -1, -1, -1, -1).clone()
+        for mask in range(8):
+            for e in range(3):
+                if not ((mask >> e) & 1):
+                    coalition_inputs[mask, rows, q_src, e] = uniform[rows, q_src, e]
+
+        flat_inputs = coalition_inputs.reshape(8 * n, 3, 3, 10)
+        q_rep = query.unsqueeze(0).expand(8, -1, -1).reshape(8 * n, 2)
+        c_rep = context.to(dtype=dtype).unsqueeze(0).expand(8, -1, -1).reshape(8 * n, 10)
+        flat_logits = self._compute(flat_inputs, q_rep, c_rep)["logits"].reshape(8, n, 10)
+        # v[mask, b] is the target class logit under coalition `mask`
+        v = flat_logits[:, rows, chosen_target]
+        v0, v1, v2, v3, v4, v5, v6, v7 = v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7]
+
+        phi_0 = (v1 - v0) / 3.0 + (v3 - v2) / 6.0 + (v5 - v4) / 6.0 + (v7 - v6) / 3.0
+        phi_1 = (v2 - v0) / 3.0 + (v3 - v1) / 6.0 + (v6 - v4) / 6.0 + (v7 - v5) / 3.0
+        phi_2 = (v4 - v0) / 3.0 + (v5 - v1) / 6.0 + (v6 - v2) / 6.0 + (v7 - v3) / 3.0
+        shapley_values = torch.stack((phi_0, phi_1, phi_2), dim=-1)
+
+        # Harsanyi / Mobius coalition dividends
+        d0 = v1 - v0
+        d1 = v2 - v0
+        d2 = v4 - v0
+        d01 = v3 - v1 - v2 + v0
+        d02 = v5 - v1 - v4 + v0
+        d12 = v6 - v2 - v4 + v0
+        d012 = v7 - v3 - v5 - v6 + v1 + v2 + v4 - v0
+
+        # Order-2 Shapley-Taylor symmetric matrix [n, 3, 3] whose sum equals v7 - v0
+        st_matrix = torch.zeros((n, 3, 3), dtype=dtype, device=p.device)
+        st_matrix[:, 0, 0] = d0
+        st_matrix[:, 1, 1] = d1
+        st_matrix[:, 2, 2] = d2
+        pair_01 = 0.5 * (d01 + d012 / 3.0)
+        pair_02 = 0.5 * (d02 + d012 / 3.0)
+        pair_12 = 0.5 * (d12 + d012 / 3.0)
+        st_matrix[:, 0, 1] = pair_01
+        st_matrix[:, 1, 0] = pair_01
+        st_matrix[:, 0, 2] = pair_02
+        st_matrix[:, 2, 0] = pair_02
+        st_matrix[:, 1, 2] = pair_12
+        st_matrix[:, 2, 1] = pair_12
+
+        total_gain = v7 - v0
+        efficiency_error = (shapley_values.sum(dim=-1) - total_gain).abs()
+        taylor_efficiency_error = (st_matrix.sum(dim=(-1, -2)) - total_gain).abs()
+
+        coalition_labels = ("empty", "E0", "E1", "E0+E1", "E2", "E0+E2", "E1+E2", "E0+E1+E2")
+        coalition_payoffs = {coalition_labels[m]: v[m] for m in range(8)}
+        return {
+            "target": chosen_target,
+            "shapley_values": shapley_values,
+            "interaction_matrix": st_matrix,
+            "mobius_dividends": {
+                "d0": d0, "d1": d1, "d2": d2,
+                "d01": d01, "d02": d02, "d12": d12,
+                "d012": d012,
+            },
+            "coalition_payoffs": coalition_payoffs,
+            "total_gain": total_gain,
+            "baseline_logit": v0,
+            "full_logit": v7,
+            "efficiency_error": efficiency_error,
+            "taylor_efficiency_error": taylor_efficiency_error,
         }
 
     def forward(self, donors, query, context):
