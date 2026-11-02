@@ -106,7 +106,7 @@ async function loadStudy() {
     byId("study-status").classList.toggle("unavailable",!complete);
     const config=study.config || {};
     const proto=config.protocol || "v1";
-    if(byId("protocol-version")) byId("protocol-version").textContent="v0.6 ("+proto+")";
+    if(byId("protocol-version")) byId("protocol-version").textContent="v0.7 ("+proto+")";
     byId("study-config").textContent=study.rows.length+" arm records · "+human(config.phase||config.stage||"saved evaluation")+" ("+proto+")";
     const seeds=[...new Set(study.rows.map(x=>x.seed))].sort((a,b)=>a-b);
     const seedSelect=byId("seed-select");
@@ -413,6 +413,38 @@ function renderPidBars(container, metaNode, pid){
     container.append(row);
   });
 }
+let supportsDisplayTransition;
+function canTransitionDisplay(){
+  if(supportsDisplayTransition!==undefined)return supportsDisplayTransition;
+  const probe=document.createElement("div");
+  probe.style.cssText="transition: display 1s allow-discrete !important; display: block;";
+  document.body.appendChild(probe);
+  getComputedStyle(probe).display;
+  probe.style.display="none";
+  supportsDisplayTransition=getComputedStyle(probe).display==="block";
+  probe.remove();
+  return supportsDisplayTransition;
+}
+function supportsTopLayerExit(){
+  return window.CSS?.supports?.("overlay","auto") && canTransitionDisplay();
+}
+async function closeTopLayer(el){
+  if(!el)return;
+  if(!supportsTopLayerExit()){
+    el.setAttribute("data-closing","");
+    const animations=el.getAnimations({subtree:true});
+    if(animations.length>0){
+      await Promise.race([
+        Promise.allSettled(animations.map(a=>a.finished)),
+        new Promise(r=>setTimeout(r,2000)),
+      ]);
+    }
+    if(!el.hasAttribute("data-closing"))return;
+    el.removeAttribute("data-closing");
+  }
+  if(typeof el.close==="function")el.close();
+  else if(typeof el.hidePopover==="function")el.hidePopover();
+}
 function initReceiptDialog(){
   const dialog=byId("circuit-receipt-dialog");
   const openBtn=byId("pg-open-receipt");
@@ -425,8 +457,12 @@ function initReceiptDialog(){
     });
   }
   if(closeBtn){
-    closeBtn.addEventListener("click",()=>dialog.close());
+    closeBtn.addEventListener("click",()=>closeTopLayer(dialog));
   }
+  dialog.addEventListener("cancel",(event)=>{
+    event.preventDefault();
+    closeTopLayer(dialog);
+  });
   if(!("closedBy" in HTMLDialogElement.prototype)){
     dialog.addEventListener("click",(event)=>{
       const rect=dialog.getBoundingClientRect();
@@ -437,7 +473,7 @@ function initReceiptDialog(){
         event.clientX<=rect.left+rect.width
       );
       if(!clickedInDialog){
-        dialog.close();
+        closeTopLayer(dialog);
       }
     });
   }
@@ -448,7 +484,8 @@ function populateReceiptDialog(data){
   body.replaceChildren();
   const pid=data.pid||{};
   const med=data.causal_mediation||{};
-  const fe=data.tail_free_energy||{};
+  const ig=data.information_geometry||{};
+  const tr=data.tangent_robustness||{};
   const grid=element("div",undefined,"receipt-grid");
   const b1=element("div",undefined,"receipt-box");
   b1.append(
@@ -468,10 +505,9 @@ function populateReceiptDialog(data){
   );
   const b3=element("div",undefined,"receipt-box");
   b3.append(
-    element("strong","3. Weighted Conformal Prediction (Tibshirani et al. 2019)"),
-    element("div","Standard RAPS Set C(x) = {"+(data.conformal_set||[]).join(", ")+"}"),
-    element("div","Weighted Set C_w(x) = {"+(data.wcp_conformal_set||data.conformal_set||[]).join(", ")+"}"),
-    element("div","Shift Distance d_shift(x) = "+Number(data.wcp_shift_distance||0).toFixed(3)+" · q̂_w = "+Number(data.wcp_q_hat||data.conformal_q_hat||0).toFixed(3))
+    element("strong","3. Weighted Conformal & CRC (Tibshirani 2019; Angelopoulos 2024)"),
+    element("div","Standard RAPS C(x) = {"+(data.conformal_set||[]).join(", ")+"} · WCP C_w(x) = {"+(data.wcp_conformal_set||data.conformal_set||[]).join(", ")+"}"),
+    element("div","Conformal Risk Control C_CRC(x) = {"+(data.crc_conformal_set||data.conformal_set||[]).join(", ")+"} (λ_CRC = "+Number(data.crc_lambda||0).toFixed(3)+")")
   );
   const b4=element("div",undefined,"receipt-box");
   const eEnergies=Array.isArray(data.tail_free_energy)?data.tail_free_energy:[0,0,0];
@@ -482,10 +518,98 @@ function populateReceiptDialog(data){
     element("div","Effective Runner-up Support N_eff = ["+nEff.map(x=>Number(x).toFixed(2)).join(", ")+"] / 9.0"),
     element("div","Mahalanobis D_M = ["+(data.mahalanobis_distance||[0,0,0]).map(x=>Number(x).toFixed(1)).join(", ")+"]")
   );
-  grid.append(b1,b2,b3,b4);
+  const b5=element("div",undefined,"receipt-box");
+  const frMat=ig.fisher_rao_matrix||[[0,0,0],[0,0,0],[0,0,0]];
+  b5.append(
+    element("strong","5. Fisher–Rao Simplex Geometry (Rao 1945; Amari 2016)"),
+    element("div","Geodesic d_FR(A,B)="+Number(frMat[0]?.[1]||0).toFixed(2)+" · d_FR(A,C)="+Number(frMat[0]?.[2]||0).toFixed(2)+" · d_FR(B,C)="+Number(frMat[1]?.[2]||0).toFixed(2)+" rad"),
+    element("div","Fréchet Var Unweighted = "+Number(ig.unweighted_frechet_variance||0).toFixed(3)+" → Routed = "+Number(ig.routed_frechet_variance||0).toFixed(4)),
+    element("div","Geodesic Conflict Suppression = "+percentage(ig.geodesic_suppression_ratio))
+  );
+  const b6=element("div",undefined,"receipt-box");
+  b6.append(
+    element("strong","6. Tangent-Space Certified TV Robustness (v0.7)"),
+    element("div","Logit Margin γ(P) = "+Number(tr.logit_margin||0).toFixed(2)+" logits"),
+    element("div","Tangent Span ||P_tan ∇γ|| = ["+(tr.tangent_span_sensitivity||[0,0,0]).map(x=>Number(x).toFixed(2)).join(", ")+"]"),
+    element("div","Certified TV Radius r^TV = ["+(tr.certified_tv_radius||[1,1,1]).map(x=>Number(x).toFixed(2)).join(", ")+"]")
+  );
+  const vb=data.vertex_breakdown||{};
+  const b7=element("div",undefined,"receipt-box");
+  b7.append(
+    element("strong","7. Simplex Vertex Breakdown TV Profile (v0.8)"),
+    element("div","Min Singleton Breakdown TV = "+(vb.min_singleton_breakdown_tv!=null?Number(vb.min_singleton_breakdown_tv).toFixed(3):"Immune (No vertex flip)")),
+    element("div","Min Pair Coalition Breakdown TV = "+(vb.min_pair_breakdown_tv!=null?Number(vb.min_pair_breakdown_tv).toFixed(3):"—")),
+    element("div","Grand Coalition Breakdown TV = "+(vb.grand_coalition_breakdown_tv!=null?Number(vb.grand_coalition_breakdown_tv).toFixed(3):"—")+" (Adv Class: "+(vb.grand_coalition?.adversarial_prediction??'—')+")")
+  );
+  grid.append(b1,b2,b3,b4,b5,b6,b7);
   const coal=element("div",undefined,"receipt-mono");
   coal.textContent="2³ Coalition Payoff Lattice (logits): "+JSON.stringify(data.coalition_payoffs||{});
   body.append(grid,coal);
+}
+function renderGeodesicWidget(data){
+  const svg=byId("pg-geodesic-svg");
+  const meta=byId("pg-geodesic-meta");
+  const popBody=byId("geodesic-popover-body");
+  if(!svg||!data)return;
+  const ig=data.information_geometry||{};
+  const tr=data.tangent_robustness||{};
+  const vb=data.vertex_breakdown||{};
+  const src=Number(data.source||0);
+  const wts=data.expert_weights?.[src]||[0.33,0.33,0.34];
+  const dmg=new Set(Array.isArray(data.damaged_experts)?data.damaged_experts:[]);
+  const fr=ig.fisher_rao_matrix||[[0,0,0],[0,0,0],[0,0,0]];
+  const tvRad=tr.certified_tv_radius||[1,1,1];
+  const vA=[105,14], vB=[28,78], vC=[182,78];
+  const bx=wts[0]*vA[0]+wts[1]*vB[0]+wts[2]*vC[0];
+  const by=wts[0]*vA[1]+wts[1]*vB[1]+wts[2]*vC[1];
+  svg.innerHTML=`
+    <polygon points="${vA[0]},${vA[1]} ${vB[0]},${vB[1]} ${vC[0]},${vC[1]}" fill="#f4f2fb" stroke="#d5ccf0" stroke-width="1.2"/>
+    <text x="${(vA[0]+vB[0])/2-14}" y="${(vA[1]+vB[1])/2}" font-size="7" fill="#7c828b">${Number(fr[0]?.[1]||0).toFixed(2)}</text>
+    <text x="${(vA[0]+vC[0])/2+4}" y="${(vA[1]+vC[1])/2}" font-size="7" fill="#7c828b">${Number(fr[0]?.[2]||0).toFixed(2)}</text>
+    <text x="105" y="88" text-anchor="middle" font-size="7" fill="#7c828b">d_FR(B,C)=${Number(fr[1]?.[2]||0).toFixed(2)} rad</text>
+    <circle cx="${vA[0]}" cy="${vA[1]}" r="5" fill="${dmg.has(0)?'#c0392b':'#578776'}"/>
+    <circle cx="${vB[0]}" cy="${vB[1]}" r="5" fill="${dmg.has(1)?'#c0392b':'#578776'}"/>
+    <circle cx="${vC[0]}" cy="${vC[1]}" r="5" fill="${dmg.has(2)?'#c0392b':'#578776'}"/>
+    <circle cx="${bx.toFixed(1)}" cy="${by.toFixed(1)}" r="5.5" fill="#7358cf" stroke="#fff" stroke-width="1.5"/>
+    <text x="${vA[0]}" y="${vA[1]-6}" text-anchor="middle" font-size="7.5" font-weight="600" fill="#222b36">A</text>
+    <text x="${vB[0]-9}" y="${vB[1]+3}" text-anchor="middle" font-size="7.5" font-weight="600" fill="#222b36">B</text>
+    <text x="${vC[0]+9}" y="${vC[1]+3}" text-anchor="middle" font-size="7.5" font-weight="600" fill="#222b36">C</text>
+  `;
+  if(meta){
+    meta.replaceChildren(
+      element("div","Fréchet σ²: "+Number(ig.unweighted_frechet_variance||0).toFixed(2)+" → "+Number(ig.routed_frechet_variance||0).toFixed(3)+" rad²"),
+      element("div","Geodesic Suppression: "+percentage(ig.geodesic_suppression_ratio)),
+      element("div","Cert r^TV: ["+tvRad.map(x=>Number(x).toFixed(2)).join(", ")+"] · Break TV: "+(vb.grand_coalition_breakdown_tv!=null?Number(vb.grand_coalition_breakdown_tv).toFixed(2):"—")),
+      element("div","CRC Set: {"+(data.crc_conformal_set||data.conformal_set||[]).join(", ")+"} (λ="+Number(data.crc_lambda||0).toFixed(2)+")")
+    );
+  }
+  if(popBody){
+    popBody.replaceChildren();
+    const g=element("div",undefined,"receipt-grid");
+    const p1=element("div",undefined,"receipt-box");
+    p1.append(
+      element("strong","Fisher–Rao Geodesic Arc Matrix d_FR (rad)"),
+      element("div","d_FR(A, B) = "+Number(fr[0]?.[1]||0).toFixed(3)+" · d_FR(A, C) = "+Number(fr[0]?.[2]||0).toFixed(3)),
+      element("div","d_FR(B, C) = "+Number(fr[1]?.[2]||0).toFixed(3)+" (max π ≈ 3.142)"),
+      element("div","Fréchet Suppression = "+percentage(ig.geodesic_suppression_ratio))
+    );
+    const p2=element("div",undefined,"receipt-box");
+    p2.append(
+      element("strong","Tangent-Space Certified TV Radius r^TV"),
+      element("div","Margin γ(P) = "+Number(tr.logit_margin||0).toFixed(2)+" logits"),
+      element("div","Span ||P_tan ∇γ|| = ["+(tr.tangent_span_sensitivity||[0,0,0]).map(x=>Number(x).toFixed(2)).join(", ")+"]"),
+      element("div","Certified r^TV = ["+tvRad.map(x=>Number(x).toFixed(2)).join(", ")+"]")
+    );
+    const p3=element("div",undefined,"receipt-box");
+    p3.append(
+      element("strong","Simplex Vertex Breakdown TV Profile"),
+      element("div","Singleton TV = "+(vb.min_singleton_breakdown_tv!=null?Number(vb.min_singleton_breakdown_tv).toFixed(3):"Immune (No vertex flip)")),
+      element("div","Pair Coalition TV = "+(vb.min_pair_breakdown_tv!=null?Number(vb.min_pair_breakdown_tv).toFixed(3):"—")),
+      element("div","Grand Coalition TV = "+(vb.grand_coalition_breakdown_tv!=null?Number(vb.grand_coalition_breakdown_tv).toFixed(3):"—")+" → Class "+(vb.grand_coalition?.adversarial_prediction??'—'))
+    );
+    g.append(p1,p2,p3);
+    popBody.append(g);
+  }
 }
 function scheduleLivePredict(){clearTimeout(pgDebounceTimer);pgDebounceTimer=setTimeout(runLivePredict,80);}
 async function loadPresetDigit(digit){
@@ -687,6 +811,7 @@ function renderLiveOutput(data){
     pill.append(element("strong","Expert "+["A","B","C"][j]+(isDmg?" (corrupted)":"")),element("span","τ "+percentage(tVal)+mStr+" · Wt "+percentage(wVal)));
     pills.append(pill);
   }
+  renderGeodesicWidget(data);
 }
 function renderLiveArena(arena){
   if(!arena||!Array.isArray(arena.arms))return;

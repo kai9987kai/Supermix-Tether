@@ -13,6 +13,8 @@ from tether.conformal import (
     adaptive_conformal_inference,
     calibration_metrics,
     conformal_quantile,
+    conformal_risk_control,
+    evaluate_conformal_risk_control,
     evaluate_conformal_sets,
     evaluate_nex_conformal_sets,
     evaluate_weighted_conformal_sets,
@@ -24,6 +26,7 @@ from tether.conformal import (
     raps_prediction_sets,
     sanitize_specialist_posteriors,
     score_mahalanobis_forensics,
+    selective_risk_coverage_profile,
     softmax_temperature,
     weighted_conformal_prediction_sets,
 )
@@ -326,4 +329,102 @@ def test_causal_mediation_and_critical_breakdown_threshold():
             assert pr[e_idx] > 8.5
         else:
             assert pr[e_idx] < 8.5
+
+
+def test_information_geometry_fisher_rao_suppression():
+    study_path = Path("outputs/v2-confirmation")
+    if not (study_path / "summary.json").exists():
+        pytest.skip("outputs/v2-confirmation not present")
+
+    pred = live_predict(
+        study_path, digit=3, source=0, operation=0,
+        tamper_mode="corrupt_2", corrupted_class=8, confidence=0.98,
+        seed=101, arm="tether",
+    )
+    geo = pred["information_geometry"]
+    fr_mat = np.asarray(geo["pairwise_fisher_rao"], dtype=np.float64)
+    bc_mat = np.asarray(geo["pairwise_bhattacharyya"], dtype=np.float64)
+    hel_mat = np.asarray(geo["pairwise_hellinger"], dtype=np.float64)
+    assert fr_mat.shape == (3, 3)
+    assert np.allclose(fr_mat, fr_mat.T, atol=1e-6)
+    assert np.all(fr_mat >= 0.0) and np.all(fr_mat <= np.pi + 1e-5)
+    # Identity: d_H^2 = 1 - BC
+    assert np.allclose(hel_mat ** 2, 1.0 - bc_mat, atol=1e-4)
+    assert pytest.approx(sum(geo["frechet_barycenter"]), abs=1e-4) == 1.0
+    # Under 2-of-3 corruption, unweighted Fisher-Rao variance is high (> 1.0 rad^2),
+    # while Tether's routed Fréchet variance collapses near zero (> 90% suppression)
+    assert geo["unweighted_frechet_variance"] > 1.0
+    assert geo["routed_frechet_variance"] < 0.12
+    assert geo["geodesic_suppression_ratio"] > 0.90
+
+
+def test_tangent_jacobian_robustness_and_tv_radius():
+    study_path = Path("outputs/v2-confirmation")
+    if not (study_path / "summary.json").exists():
+        pytest.skip("outputs/v2-confirmation not present")
+
+    pred = live_predict(
+        study_path, digit=3, source=0, operation=0,
+        tamper_mode="corrupt_2", corrupted_class=8, confidence=0.98,
+        seed=101, arm="tether",
+    )
+    tan = pred["tangent_robustness"]
+    assert tan["margin_logit"] > 2.0
+    # Every tangent gradient row must lie in T\Delta^9 (sum to 0)
+    for row in tan["queried_source_tangent_gradients"]:
+        assert abs(sum(row)) < 1e-4
+    # Corrupted specialists (0 and 1) should have near-zero tangent sensitivity and certified TV radius ~ 1.0
+    dmg = set(pred["damaged_experts"])
+    for e_idx in range(3):
+        if e_idx in dmg:
+            assert tan["certified_tv_radius"][e_idx] == pytest.approx(1.0, abs=0.05)
+
+
+def test_conformal_risk_control_and_selective_aurc():
+    study_path = Path("outputs/v2-confirmation")
+    if not (study_path / "summary.json").exists():
+        pytest.skip("outputs/v2-confirmation not present")
+
+    cal = calibrate_study(study_path, alpha=0.05, seed=101)
+    tether_cal = cal["summary_by_arm"]["tether"]
+    assert 0.0 < tether_cal["crc_lambda"] <= 1.0
+    d2 = tether_cal["conditions"]["damage_two"]
+    assert d2["crc_empirical_coverage"] >= 0.90
+    assert d2["crc_expected_loss"] <= 0.10
+    assert d2["aurc"] >= d2["oracle_aurc"] >= 0.0
+    assert d2["e_aurc"] == pytest.approx(d2["aurc"] - d2["oracle_aurc"], abs=1e-5)
+
+
+def test_vertex_breakdown_radius_and_adversarial_coalitions():
+    study_path = Path("outputs/v2-confirmation")
+    if not (study_path / "summary.json").exists():
+        pytest.skip("outputs/v2-confirmation not present")
+
+    pred = live_predict(
+        study_path, digit=3, source=0, operation=0,
+        tamper_mode="clean", seed=101, arm="tether",
+    )
+    vb = pred["vertex_breakdown"]
+    assert "coalitions" in vb
+    assert len(vb["coalitions"]) == 7
+    # Verify JSON serialization with allow_nan=False
+    dumped = json.dumps(pred, allow_nan=False)
+    assert len(dumped) > 0
+
+    # Grand coalition {0, 1, 2} must flip along at least one vertex path
+    grand = vb["grand_coalition"]
+    assert grand["flipped"] is True
+    assert 0.0 < grand["breakdown_tv"] <= 1.0
+    assert grand["attacking_vertex"] in range(10)
+    assert grand["adversarial_prediction"] in range(10)
+    assert grand["adversarial_prediction"] != vb["target"]
+
+    # On clean inputs with high trust, singletons are robust to vertex perturbation
+    for e in [0, 1, 2]:
+        single = vb["coalitions"][f"{{{e}}}"]
+        # Either immune (no flip along straight vertex paths) or requires substantial TV budget
+        if single["flipped"]:
+            assert single["breakdown_tv"] > 0.4
+
+
 

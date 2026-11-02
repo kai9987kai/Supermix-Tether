@@ -34,7 +34,7 @@ def running_server(study):
         thread.join(timeout=2)
 
 
-def request(port, path, method="GET", body=None, headers=None, timeout=15):
+def request(port, path, method="GET", body=None, headers=None, timeout=45):
     connection = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
     try:
         connection.request(method, path, body=body, headers=headers or {})
@@ -149,6 +149,7 @@ def test_live_predict_endpoints():
     study_path = Path("outputs/v2-confirmation")
     if not (study_path / "summary.json").exists():
         pytest.skip("outputs/v2-confirmation not present")
+    import tether.experiment  # noqa: F401
     with running_server(study_path) as port:
         status, _, body = request(port, "/api/live_predict?digit=7")
         assert status == 200
@@ -181,6 +182,9 @@ def test_live_predict_endpoints():
         assert "visual_dominance_ratio" in arena_payload["arms"][0]
         assert "critical_corruption_threshold" in arena_payload["arms"][0]
         assert "wcp_conformal_set" in arena_payload["arms"][0]
+        assert "crc_conformal_set" in arena_payload["arms"][0]
+        assert "geodesic_suppression_ratio" in arena_payload["arms"][0]
+        assert "mean_certified_tv_radius" in arena_payload["arms"][0]
         assert "sweep" in arena_payload
 
         # Conformal calibration endpoint

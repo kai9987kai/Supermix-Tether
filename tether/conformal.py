@@ -376,7 +376,9 @@ def adaptive_conformal_inference(cal_scores: np.ndarray, probabilities: np.ndarr
     penalties = lam_reg * np.maximum(0.0, ranks - float(k_reg))
     candidate_scores = cumsum_before + (1.0 - sorted_probs) * 0.5 + penalties
 
-    max_cal = float(cal_scores.max())
+    sorted_cal = np.sort(cal_scores)
+    m_cal = sorted_cal.size
+    max_cal = float(sorted_cal[-1])
     max_possible = 1.5 + lam_reg * max(0, k - k_reg)
     alpha_t = float(alpha)
     sets: list[list[int]] = []
@@ -398,7 +400,9 @@ def adaptive_conformal_inference(cal_scores: np.ndarray, probabilities: np.ndarr
         elif alpha_t >= 0.995:
             q_t = 1e-6
         else:
-            q_t = conformal_quantile(cal_scores, alpha=float(np.clip(alpha_t, 0.002, 0.995)))
+            a_clip = float(np.clip(alpha_t, 0.002, 0.995))
+            idx_q = min(m_cal - 1, max(0, math.ceil((m_cal + 1) * (1.0 - a_clip)) - 1))
+            q_t = max(float(sorted_cal[idx_q]), 1e-6)
 
         included_ranks = np.where(candidate_scores[t] <= q_t)[0]
         if included_ranks.size == 0:
@@ -633,7 +637,8 @@ def weighted_conformal_prediction_sets(
     v_sorted = v_cal[order]
     d_sorted = d_cal[order]
     w_cal = np.exp(np.clip(beta * d_sorted, -20.0, 20.0))
-    sum_w_cal = float(w_cal.sum())
+    cum_w_cal = np.cumsum(w_cal)
+    sum_w_cal = float(cum_w_cal[-1])
     cal_q95 = float(np.quantile(d_cal, 0.95))
 
     n_test, num_classes = logits.shape
@@ -652,9 +657,7 @@ def weighted_conformal_prediction_sets(
 
     for i in range(n_test):
         denom = sum_w_cal + float(w_test[i])
-        p_cal = w_cal / denom
-        cum_w = np.cumsum(p_cal)
-        idx = int(np.searchsorted(cum_w, 1.0 - alpha, side="left"))
+        idx = int(np.searchsorted(cum_w_cal, (1.0 - alpha) * denom, side="left"))
         excess_shift = max(0.0, float(d_test[i]) - cal_q95)
         if idx < len(v_sorted):
             q_base = float(v_sorted[idx])
@@ -777,4 +780,171 @@ def helmholtz_free_energy_forensics(
     return {
         "tail_free_energy": tail_free_energy,
         "participation_ratio": participation_ratio,
+    }
+
+
+def conformal_risk_control(
+    cal_probs: np.ndarray,
+    cal_targets: np.ndarray,
+    alpha: float = 0.05,
+    k_reg: int = 1,
+    lam_reg: float = 0.02,
+    rank_weight: float = 0.35,
+    bound_b: float = 1.0,
+) -> dict[str, Any]:
+    """Fit Conformal Risk Control threshold lambda_CRC for monotone bounded loss (Angelopoulos et al., ICLR 2024).
+
+    Given calibration probabilities [n, K] and targets [n], evaluates the monotone non-increasing
+    rank-weighted miscoverage loss L_i(lambda) in [0, B]:
+        L_i(lambda) = 1{y_i not in C_lambda(x_i)} * ((1 - w_r) + w_r * rank(y_i) / (K - 1))
+    and selects:
+        lambda_CRC = inf { lambda : (sum_{i=1}^n L_i(lambda) + B) / (n + 1) <= alpha }.
+    Guarantees finite-sample expected risk E[L_{n+1}(lambda_CRC)] <= alpha under exchangeability.
+    """
+    if not 0.0 < alpha < 1.0:
+        raise ValueError("alpha must lie strictly in (0, 1)")
+    probs = np.asarray(cal_probs, dtype=np.float64)
+    y = np.asarray(cal_targets, dtype=np.int64).reshape(-1)
+    n, k = probs.shape
+    if n == 0 or y.shape[0] != n:
+        raise ValueError("cal_probs and cal_targets must be non-empty and match in length")
+
+    # Entry threshold v_i is the exact RAPS score at which true label y_i enters C_lambda(x_i)
+    v_entry = raps_nonconformity_scores(probs, y, k_reg=k_reg, lam_reg=lam_reg)
+    order = np.argsort(-probs, axis=1)
+    ranks = np.argmax(order == y[:, None], axis=1).astype(np.float64)
+
+    w_r = float(np.clip(rank_weight, 0.0, 1.0))
+    miss_severity = (1.0 - w_r) + w_r * (ranks / max(1, k - 1))
+    miss_severity = np.clip(miss_severity, 0.0, float(bound_b))
+
+    # Candidate thresholds are sorted v_entry values; L_i(lambda) = miss_severity[i] if lambda < v_entry[i] else 0
+    sorted_idx = np.argsort(v_entry)
+    v_sorted = v_entry[sorted_idx]
+    sev_sorted = miss_severity[sorted_idx]
+    # Suffix sums of severity for items not yet covered when lambda = v_sorted[j]
+    total_sev = float(sev_sorted.sum())
+    prefix_sev = np.cumsum(sev_sorted)
+    remaining_sev = total_sev - prefix_sev
+    crc_objective = (remaining_sev + float(bound_b)) / float(n + 1)
+
+    valid = np.where(crc_objective <= float(alpha))[0]
+    if valid.size > 0:
+        lambda_crc = float(v_sorted[int(valid[0])])
+        emp_risk = float(remaining_sev[int(valid[0])] / float(n))
+        bound_risk = float(crc_objective[int(valid[0])])
+    else:
+        lambda_crc = float(v_sorted[-1])
+        emp_risk = 0.0
+        bound_risk = float(bound_b) / float(n + 1)
+
+    return {
+        "lambda_crc": lambda_crc,
+        "alpha": float(alpha),
+        "empirical_cal_risk": emp_risk,
+        "certified_upper_bound": bound_risk,
+        "rank_weight": w_r,
+    }
+
+
+def evaluate_conformal_risk_control(
+    probs: np.ndarray,
+    targets: np.ndarray,
+    lambda_crc: float,
+    k_reg: int = 1,
+    lam_reg: float = 0.02,
+    rank_weight: float = 0.35,
+    epistemic_trust: np.ndarray | None = None,
+    epistemic_threshold: float = 0.10,
+) -> dict[str, Any]:
+    """Evaluate Conformal Risk Control (CRC) prediction sets and monotone risk on a test cohort."""
+    p = np.asarray(probs, dtype=np.float64)
+    y = np.asarray(targets, dtype=np.int64).reshape(-1)
+    n, k = p.shape
+    sets_info = raps_prediction_sets(
+        p, q_hat=float(lambda_crc), k_reg=k_reg, lam_reg=lam_reg,
+        epistemic_trust=epistemic_trust, epistemic_threshold=epistemic_threshold,
+    )
+    sets = sets_info["prediction_sets"]
+    order = np.argsort(-p, axis=1)
+    w_r = float(np.clip(rank_weight, 0.0, 1.0))
+
+    abstained = np.array([len(s) == 0 for s in sets], dtype=bool)
+    covered = np.array([(not abstained[i]) and (int(y[i]) in sets[i]) for i in range(n)], dtype=bool)
+    ranks = np.argmax(order == y[:, None], axis=1).astype(np.float64)
+    miss_losses = (1.0 - w_r) + w_r * (ranks / max(1, k - 1))
+    losses = np.where(abstained | covered, 0.0, miss_losses)
+
+    accepted = ~abstained
+    return {
+        "crc_lambda": round(float(lambda_crc), 5),
+        "crc_expected_loss": round(float(losses.mean()), 5),
+        "crc_accepted_loss": round(float(losses[accepted].mean()), 5) if accepted.any() else 0.0,
+        "crc_marginal_coverage": round(float(covered.mean()), 5),
+        "crc_mean_set_size": round(float(sets_info["mean_set_size"]), 5),
+        "prediction_sets": sets,
+    }
+
+
+def selective_risk_coverage_profile(
+    probs: np.ndarray,
+    targets: np.ndarray,
+    epistemic_trust: np.ndarray | None = None,
+) -> dict[str, Any]:
+    """Compute Selective Classification Risk-Coverage Curve, AURC & Excess AURC (Geifman & El-Yaniv, NeurIPS 2017).
+
+    Ranks predictions by hybrid selective confidence s(x) = p_max(x) * tau(x) and computes:
+      - aurc: Area Under the Risk-Coverage Curve in [0, 1] (lower is better).
+      - oracle_aurc: Bayes-optimal lower bound AURC* given the classifier's base accuracy.
+      - e_aurc: Excess AURC = AURC - AURC* >= 0.
+      - risk_at_90_cov / risk_at_80_cov: Selective error rates at 90% and 80% coverage.
+      - curve_coverages / curve_risks: 10-point risk-coverage trajectory for plotting.
+    """
+    p = np.asarray(probs, dtype=np.float64)
+    y = np.asarray(targets, dtype=np.int64).reshape(-1)
+    n = p.shape[0]
+    if n == 0 or y.shape[0] != n:
+        raise ValueError("probs and targets must be non-empty and match in length")
+
+    preds = p.argmax(axis=1)
+    p_max = p.max(axis=1)
+    if epistemic_trust is not None:
+        tau = np.clip(np.asarray(epistemic_trust, dtype=np.float64).reshape(-1), 0.0, 1.0)
+        score = p_max * (0.25 + 0.75 * tau)
+    else:
+        score = p_max
+
+    errors = (preds != y).astype(np.float64)
+    # Sort descending by confidence score (tie-break by p_max descending)
+    order = np.lexsort((-p_max, -score))
+    sorted_errors = errors[order]
+
+    cum_errors = np.cumsum(sorted_errors)
+    counts = np.arange(1, n + 1, dtype=np.float64)
+    risks = cum_errors / counts
+    aurc = float(risks.mean())
+
+    # Oracle ranks all correct predictions (error=0) before all incorrect predictions (error=1)
+    oracle_errors = np.sort(errors)
+    oracle_risks = np.cumsum(oracle_errors) / counts
+    oracle_aurc = float(oracle_risks.mean())
+    e_aurc = max(0.0, aurc - oracle_aurc)
+
+    idx_90 = max(0, min(n - 1, int(round(0.90 * n)) - 1))
+    idx_80 = max(0, min(n - 1, int(round(0.80 * n)) - 1))
+
+    grid_covs = [round(0.1 * k, 2) for k in range(1, 11)]
+    grid_risks = []
+    for c_val in grid_covs:
+        idx_c = max(0, min(n - 1, int(round(c_val * n)) - 1))
+        grid_risks.append(round(float(risks[idx_c]), 5))
+
+    return {
+        "aurc": round(aurc, 5),
+        "oracle_aurc": round(oracle_aurc, 5),
+        "e_aurc": round(e_aurc, 5),
+        "risk_at_90_cov": round(float(risks[idx_90]), 5),
+        "risk_at_80_cov": round(float(risks[idx_80]), 5),
+        "curve_coverages": grid_covs,
+        "curve_risks": grid_risks,
     }

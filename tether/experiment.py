@@ -6,6 +6,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import platform
@@ -23,6 +24,8 @@ from .conformal import (
     adaptive_conformal_inference,
     calibration_metrics,
     conformal_quantile,
+    conformal_risk_control,
+    evaluate_conformal_risk_control,
     evaluate_conformal_sets,
     evaluate_nex_conformal_sets,
     evaluate_weighted_conformal_sets,
@@ -34,6 +37,7 @@ from .conformal import (
     raps_prediction_sets,
     sanitize_specialist_posteriors,
     score_mahalanobis_forensics,
+    selective_risk_coverage_profile,
     softmax_temperature,
     weighted_conformal_prediction_sets,
 )
@@ -327,6 +331,9 @@ def run_study(config: StudyConfig, output_dir: Path, progress: Callable | None =
 
 
 def _restore(study_dir: Path, row: dict, config: StudyConfig):
+    key = (str(study_dir.resolve()), row["seed"], row["arm"], row.get("checkpoint_sha256", ""))
+    if key in _RESTORE_CACHE:
+        return _RESTORE_CACHE[key]
     checkpoint = torch.load(safe_artifact(study_dir, row["checkpoint"]), map_location="cpu", weights_only=True)
     if checkpoint.get("schema") != "supermix-tether-checkpoint-v1" or checkpoint["seed"] != row["seed"] or checkpoint["arm"] != row["arm"]:
         raise ValueError("checkpoint identity mismatch")
@@ -344,7 +351,10 @@ def _restore(study_dir: Path, row: dict, config: StudyConfig):
     model.eval()
     with torch.no_grad():
         posteriors = bank(split["images"]).softmax(-1)
-    return model, split, posteriors, checkpoint
+    res = (model, split, posteriors, checkpoint)
+    if len(_RESTORE_CACHE) < 128:
+        _RESTORE_CACHE[key] = res
+    return res
 
 
 def replay_study(study_dir: Path, strict: bool = False) -> dict:
@@ -460,6 +470,8 @@ def _calibrate_cached(study_dir: Path, row: dict, config: StudyConfig,
     val_conflict_q95 = float(np.quantile(val_conflict, 0.95))
     entry = {
         "temperature": t_star,
+        "val_probs": val_probs,
+        "val_targets": val_targets,
         "val_scores": val_scores,
         "val_conflict": val_conflict,
         "val_conflict_q95": val_conflict_q95,
@@ -485,6 +497,55 @@ def _make_context_tensor(context_mode: str, expected_target: int, corrupted_clas
     return torch.full((1, 10), 0.1, dtype=torch.float32)
 
 
+def _format_vertex_breakdown(res: dict, idx: int = 0) -> dict:
+    """Format vertex breakdown radius tensors into a JSON-safe, non-NaN dictionary."""
+    coalitions_data = {}
+    tv_vals = res["breakdown_tv"][idx].tolist()
+    vert_vals = res["breakdown_vertex"][idx].tolist()
+    adv_vals = res["adversarial_prediction"][idx].tolist()
+    flipped_vals = res["flipped"][idx].tolist()
+    per_vert_vals = res["per_vertex_tv"][idx].tolist()
+
+    for k, coal in enumerate(res["coalitions"]):
+        label = "{" + ",".join(str(e) for e in coal) + "}"
+        is_flip = bool(flipped_vals[k])
+        tv = float(tv_vals[k]) if (is_flip and math.isfinite(tv_vals[k])) else None
+        v = int(vert_vals[k]) if (is_flip and vert_vals[k] >= 0) else None
+        adv = int(adv_vals[k]) if (is_flip and adv_vals[k] >= 0) else None
+        pv = [round(float(x), 4) if math.isfinite(x) else None for x in per_vert_vals[k]]
+        coalitions_data[label] = {
+            "coalition": list(coal),
+            "flipped": is_flip,
+            "breakdown_tv": round(tv, 4) if tv is not None else None,
+            "attacking_vertex": v,
+            "adversarial_prediction": adv,
+            "per_vertex_tv": pv,
+        }
+
+    singletons = [coalitions_data[k] for k in ["{0}", "{1}", "{2}"]]
+    pairs = [coalitions_data[k] for k in ["{0,1}", "{0,2}", "{1,2}"]]
+    grand = coalitions_data.get("{0,1,2}", {})
+
+    singleton_tvs = [c["breakdown_tv"] for c in singletons if c["breakdown_tv"] is not None]
+    min_singleton_tv = min(singleton_tvs) if singleton_tvs else None
+
+    pair_tvs = [c["breakdown_tv"] for c in pairs if c["breakdown_tv"] is not None]
+    min_pair_tv = min(pair_tvs) if pair_tvs else None
+
+    tgt = res["target"][idx]
+    if hasattr(tgt, "item"):
+        tgt = tgt.item()
+
+    return {
+        "target": int(tgt),
+        "coalitions": coalitions_data,
+        "grand_coalition": grand,
+        "min_singleton_breakdown_tv": min_singleton_tv,
+        "min_pair_breakdown_tv": min_pair_tv,
+        "grand_coalition_breakdown_tv": grand.get("breakdown_tv"),
+    }
+
+
 def inspect_example(study_dir: Path, index: int = 0, arm: str = "tether",
                     mode: str = "factual", seed: int | None = None,
                     alpha: float = 0.05) -> dict:
@@ -499,8 +560,6 @@ def inspect_example(study_dir: Path, index: int = 0, arm: str = "tether",
     if not isinstance(alpha, (int, float)) or isinstance(alpha, bool) or not 0.0 < alpha < 1.0:
         raise ValueError("alpha must lie in (0, 1)")
     row = next(r for r in summary["rows"] if r["arm"] == arm and (seed is None or r["seed"] == seed))
-    previous_threads = torch.get_num_threads()
-    torch.set_num_threads(config.threads)
     try:
         model, split, posteriors, _ = _restore(study_dir, row, config)
         cal = _calibrate_cached(study_dir, row, config, model, split, posteriors)
@@ -556,11 +615,21 @@ def inspect_example(study_dir: Path, index: int = 0, arm: str = "tether",
                 corrupted_class=int((target[index].item() + 1) % 10),
                 target=target[index:index + 1],
             )
+            info_geom = model.information_geometry(d_slice, q_slice, c_slice)
+            vertex_breakdown = model.vertex_breakdown_radius(d_slice, q_slice, c_slice, target=target[index:index + 1])
+        tangent_rob = model.tangent_jacobian_robustness(d_slice, q_slice, c_slice, target=target[index:index + 1])
+        vb_fmt = _format_vertex_breakdown(vertex_breakdown, 0)
         attribution = model.attribute(d_slice, q_slice, c_slice)
         ig = model.integrated_gradients(d_slice, q_slice, c_slice, steps=128)
         cal_probs = softmax_temperature(logits_np, temperature=cal["temperature"])
         ep_trust = float(detail["epistemic_trust"][0])
         conflict_val = float(detail["queried_conflict_jsd"][0])
+        crc_fit = conformal_risk_control(cal["val_probs"], cal["val_targets"], alpha=float(alpha))
+        crc_sets = raps_prediction_sets(
+            cal_probs, crc_fit["lambda_crc"], k_reg=1, lam_reg=0.02,
+            epistemic_trust=np.array([ep_trust]) if model.forensic else None,
+            epistemic_threshold=model.epistemic_threshold,
+        )
         raps = raps_prediction_sets(
             cal_probs, q_hat, k_reg=1, lam_reg=0.02,
             epistemic_trust=np.array([ep_trust]) if model.forensic else None,
@@ -609,6 +678,31 @@ def inspect_example(study_dir: Path, index: int = 0, arm: str = "tether",
                 "conformal_set": raps["prediction_sets"][0],
                 "nex_conformal_set": nex_raps["prediction_sets"][0],
                 "wcp_conformal_set": wcp["prediction_sets"][0],
+                "crc_conformal_set": crc_sets["prediction_sets"][0],
+                "crc_lambda": round(float(crc_fit["lambda_crc"]), 4),
+                "information_geometry": {
+                    "fisher_rao_matrix": [[round(float(x), 4) for x in r] for r in info_geom["fisher_rao_matrix"][0, source].tolist()],
+                    "pairwise_fisher_rao": [[round(float(x), 4) for x in r] for r in info_geom["fisher_rao_matrix"][0, source].tolist()],
+                    "bhattacharyya_matrix": [[round(float(x), 4) for x in r] for r in info_geom["bhattacharyya_matrix"][0, source].tolist()],
+                    "pairwise_bhattacharyya": [[round(float(x), 4) for x in r] for r in info_geom["bhattacharyya_matrix"][0, source].tolist()],
+                    "hellinger_matrix": [[round(float(x), 4) for x in r] for r in info_geom["hellinger_matrix"][0, source].tolist()],
+                    "pairwise_hellinger": [[round(float(x), 4) for x in r] for r in info_geom["hellinger_matrix"][0, source].tolist()],
+                    "frechet_barycenter": [round(float(x), 6) for x in info_geom["frechet_barycenter"][0, source].tolist()],
+                    "unweighted_frechet_variance": round(float(info_geom["unweighted_frechet_variance"][0, source]), 4),
+                    "routed_frechet_variance": round(float(info_geom["routed_frechet_variance"][0, source]), 4),
+                    "geodesic_suppression_ratio": round(float(info_geom["geodesic_suppression_ratio"][0, source]), 4),
+                },
+                "tangent_robustness": {
+                    "logit_margin": round(float(tangent_rob["logit_margin"][0]), 4),
+                    "margin_logit": round(float(tangent_rob["logit_margin"][0]), 4),
+                    "queried_source_tangent_gradients": [[round(float(x), 6) for x in r] for r in tangent_rob["tangent_gradients"][0, source].tolist()],
+                    "tangent_span_sensitivity": [round(float(x), 4) for x in tangent_rob["tangent_span_sensitivity"][0, source].tolist()],
+                    "tangent_l2_sensitivity": [round(float(x), 4) for x in tangent_rob["tangent_l2_sensitivity"][0, source].tolist()],
+                    "certified_tv_radius": [round(float(x), 4) for x in tangent_rob["certified_tv_radius"][0, source].tolist()],
+                },
+                "vertex_breakdown": vb_fmt,
+                "min_singleton_breakdown_tv": vb_fmt["min_singleton_breakdown_tv"],
+                "grand_coalition_breakdown_tv": vb_fmt["grand_coalition_breakdown_tv"],
                 "source_weights": detail["source_weights"][0].tolist(), "expert_weights": detail["expert_weights"][0].tolist(),
                 "trust_score": detail["trust_score"][0].tolist(), "tail_entropy": detail["tail_entropy"][0].tolist(),
                 "mahalanobis_distance": m_scores["mahalanobis_distance"][0].tolist(),
@@ -661,7 +755,7 @@ def inspect_example(study_dir: Path, index: int = 0, arm: str = "tether",
                 "interchange_patching": patch_summary,
                 "context": context[index].tolist(), "note": "Learned weights are routing summaries, not causal explanations. Compare controlled interventions."}
     finally:
-        torch.set_num_threads(previous_threads)
+        pass
 
 
 def live_predict(study_dir: Path, pixels: list[float] | None = None,
@@ -675,8 +769,6 @@ def live_predict(study_dir: Path, pixels: list[float] | None = None,
     summary = json.loads((study_dir / "summary.json").read_text(encoding="utf-8"))
     config = StudyConfig(**summary["config"])
     row = next(r for r in summary["rows"] if r["arm"] == arm and (seed is None or r["seed"] == seed))
-    previous_threads = torch.get_num_threads()
-    torch.set_num_threads(config.threads)
     try:
         model, split, all_posteriors, ckpt = _restore(study_dir, row, config)
         cal = _calibrate_cached(study_dir, row, config, model, split, all_posteriors)
@@ -743,7 +835,11 @@ def live_predict(study_dir: Path, pixels: list[float] | None = None,
                 stealth=str(tamper_mode).startswith("stealth"),
                 target=clean_target,
             )
+            info_geom = model.information_geometry(active_posteriors, query_t, context_t)
+            vertex_breakdown = model.vertex_breakdown_radius(active_posteriors, query_t, context_t, target=clean_target)
 
+        tangent_rob = model.tangent_jacobian_robustness(active_posteriors, query_t, context_t, target=clean_target)
+        vb_fmt = _format_vertex_breakdown(vertex_breakdown, 0)
         attribution = model.attribute(active_posteriors, query_t, context_t)
         ig = model.integrated_gradients(active_posteriors, query_t, context_t, steps=128)
         cal_probs = softmax_temperature(logits_np, temperature=cal["temperature"])
@@ -754,6 +850,12 @@ def live_predict(study_dir: Path, pixels: list[float] | None = None,
         pred_class = int(np.argmax(probabilities))
         sel_pred = -1 if abstain_flag else pred_class
         conflict_val = float(detail["queried_conflict_jsd"][0])
+        crc_fit = conformal_risk_control(cal["val_probs"], cal["val_targets"], alpha=float(alpha))
+        crc_sets = raps_prediction_sets(
+            cal_probs, crc_fit["lambda_crc"], k_reg=1, lam_reg=0.02,
+            epistemic_trust=np.array([effective_trust]) if (model.forensic or defense) else None,
+            epistemic_threshold=model.epistemic_threshold,
+        )
 
         raps = raps_prediction_sets(
             cal_probs, q_hat, k_reg=1, lam_reg=0.02,
@@ -813,6 +915,31 @@ def live_predict(study_dir: Path, pixels: list[float] | None = None,
             "conformal_set": raps["prediction_sets"][0],
             "nex_conformal_set": nex_raps["prediction_sets"][0],
             "wcp_conformal_set": wcp["prediction_sets"][0],
+            "crc_conformal_set": crc_sets["prediction_sets"][0],
+            "crc_lambda": round(float(crc_fit["lambda_crc"]), 4),
+            "information_geometry": {
+                "fisher_rao_matrix": [[round(float(x), 4) for x in r] for r in info_geom["fisher_rao_matrix"][0, source].tolist()],
+                "pairwise_fisher_rao": [[round(float(x), 4) for x in r] for r in info_geom["fisher_rao_matrix"][0, source].tolist()],
+                "bhattacharyya_matrix": [[round(float(x), 4) for x in r] for r in info_geom["bhattacharyya_matrix"][0, source].tolist()],
+                "pairwise_bhattacharyya": [[round(float(x), 4) for x in r] for r in info_geom["bhattacharyya_matrix"][0, source].tolist()],
+                "hellinger_matrix": [[round(float(x), 4) for x in r] for r in info_geom["hellinger_matrix"][0, source].tolist()],
+                "pairwise_hellinger": [[round(float(x), 4) for x in r] for r in info_geom["hellinger_matrix"][0, source].tolist()],
+                "frechet_barycenter": [round(float(x), 6) for x in info_geom["frechet_barycenter"][0, source].tolist()],
+                "unweighted_frechet_variance": round(float(info_geom["unweighted_frechet_variance"][0, source]), 4),
+                "routed_frechet_variance": round(float(info_geom["routed_frechet_variance"][0, source]), 4),
+                "geodesic_suppression_ratio": round(float(info_geom["geodesic_suppression_ratio"][0, source]), 4),
+            },
+            "tangent_robustness": {
+                "logit_margin": round(float(tangent_rob["logit_margin"][0]), 4),
+                "margin_logit": round(float(tangent_rob["logit_margin"][0]), 4),
+                "queried_source_tangent_gradients": [[round(float(x), 6) for x in r] for r in tangent_rob["tangent_gradients"][0, source].tolist()],
+                "tangent_span_sensitivity": [round(float(x), 4) for x in tangent_rob["tangent_span_sensitivity"][0, source].tolist()],
+                "tangent_l2_sensitivity": [round(float(x), 4) for x in tangent_rob["tangent_l2_sensitivity"][0, source].tolist()],
+                "certified_tv_radius": [round(float(x), 4) for x in tangent_rob["certified_tv_radius"][0, source].tolist()],
+            },
+            "vertex_breakdown": vb_fmt,
+            "min_singleton_breakdown_tv": vb_fmt["min_singleton_breakdown_tv"],
+            "grand_coalition_breakdown_tv": vb_fmt["grand_coalition_breakdown_tv"],
             "source_weights": detail["source_weights"][0].tolist(),
             "expert_weights": detail["expert_weights"][0].tolist(),
             "trust_score": detail["trust_score"][0].tolist(),
@@ -871,7 +998,7 @@ def live_predict(study_dir: Path, pixels: list[float] | None = None,
             "images": [img.tolist() for img in all_images],
         }
     finally:
-        torch.set_num_threads(previous_threads)
+        pass
 
 
 def live_arena(study_dir: Path, pixels: list[float] | None = None,
@@ -889,8 +1016,6 @@ def live_arena(study_dir: Path, pixels: list[float] | None = None,
         raise ValueError("invalid study seed")
     if tamper_mode == "none":
         tamper_mode = "clean"
-    previous_threads = torch.get_num_threads()
-    torch.set_num_threads(config.threads)
     try:
         seed_rows = {r["arm"]: r for r in summary["rows"] if r["seed"] == chosen_seed}
         first_row = next(iter(seed_rows.values()))
@@ -969,9 +1094,19 @@ def live_arena(study_dir: Path, pixels: list[float] | None = None,
                     stealth=str(tamper_mode).startswith("stealth"),
                     target=target_t,
                 )
+                info_geom = model.information_geometry(posteriors, query_t, context_t)
+                vertex_breakdown = model.vertex_breakdown_radius(posteriors, query_t, context_t, target=target_t)
+            tangent_rob = model.tangent_jacobian_robustness(posteriors, query_t, context_t, target=target_t)
+            vb_fmt = _format_vertex_breakdown(vertex_breakdown, 0)
             cal_probs = softmax_temperature(logits_np, temperature=cal["temperature"])
             ep_trust = hybrid_queried_trust if defense else float(detail["epistemic_trust"][0])
             conflict_val = float(detail["queried_conflict_jsd"][0])
+            crc_fit = conformal_risk_control(cal["val_probs"], cal["val_targets"], alpha=float(alpha))
+            crc_sets = raps_prediction_sets(
+                cal_probs, crc_fit["lambda_crc"], k_reg=1, lam_reg=0.02,
+                epistemic_trust=np.array([ep_trust]) if (model.forensic or defense) else None,
+                epistemic_threshold=model.epistemic_threshold,
+            )
             raps = raps_prediction_sets(
                 cal_probs, q_hat, k_reg=1, lam_reg=0.02,
                 epistemic_trust=np.array([ep_trust]) if (model.forensic or defense) else None,
@@ -1017,6 +1152,33 @@ def live_arena(study_dir: Path, pixels: list[float] | None = None,
                 "conformal_set": raps["prediction_sets"][0],
                 "nex_conformal_set": nex_raps["prediction_sets"][0],
                 "wcp_conformal_set": wcp["prediction_sets"][0],
+                "crc_conformal_set": crc_sets["prediction_sets"][0],
+                "crc_lambda": round(float(crc_fit["lambda_crc"]), 4),
+                "information_geometry": {
+                    "fisher_rao_matrix": [[round(float(x), 4) for x in r] for r in info_geom["fisher_rao_matrix"][0, source].tolist()],
+                    "pairwise_fisher_rao": [[round(float(x), 4) for x in r] for r in info_geom["fisher_rao_matrix"][0, source].tolist()],
+                    "bhattacharyya_matrix": [[round(float(x), 4) for x in r] for r in info_geom["bhattacharyya_matrix"][0, source].tolist()],
+                    "pairwise_bhattacharyya": [[round(float(x), 4) for x in r] for r in info_geom["bhattacharyya_matrix"][0, source].tolist()],
+                    "hellinger_matrix": [[round(float(x), 4) for x in r] for r in info_geom["hellinger_matrix"][0, source].tolist()],
+                    "pairwise_hellinger": [[round(float(x), 4) for x in r] for r in info_geom["hellinger_matrix"][0, source].tolist()],
+                    "frechet_barycenter": [round(float(x), 6) for x in info_geom["frechet_barycenter"][0, source].tolist()],
+                    "unweighted_frechet_variance": round(float(info_geom["unweighted_frechet_variance"][0, source]), 4),
+                    "routed_frechet_variance": round(float(info_geom["routed_frechet_variance"][0, source]), 4),
+                    "geodesic_suppression_ratio": round(float(info_geom["geodesic_suppression_ratio"][0, source]), 4),
+                },
+                "tangent_robustness": {
+                    "logit_margin": round(float(tangent_rob["logit_margin"][0]), 4),
+                    "margin_logit": round(float(tangent_rob["logit_margin"][0]), 4),
+                    "queried_source_tangent_gradients": [[round(float(x), 6) for x in r] for r in tangent_rob["tangent_gradients"][0, source].tolist()],
+                    "tangent_span_sensitivity": [round(float(x), 4) for x in tangent_rob["tangent_span_sensitivity"][0, source].tolist()],
+                    "tangent_l2_sensitivity": [round(float(x), 4) for x in tangent_rob["tangent_l2_sensitivity"][0, source].tolist()],
+                    "certified_tv_radius": [round(float(x), 4) for x in tangent_rob["certified_tv_radius"][0, source].tolist()],
+                },
+                "vertex_breakdown": vb_fmt,
+                "min_singleton_breakdown_tv": vb_fmt["min_singleton_breakdown_tv"],
+                "grand_coalition_breakdown_tv": vb_fmt["grand_coalition_breakdown_tv"],
+                "geodesic_suppression_ratio": round(float(info_geom["geodesic_suppression_ratio"][0, source]), 4),
+                "mean_certified_tv_radius": round(float(tangent_rob["certified_tv_radius"][0, source].mean()), 4),
                 "conformal_q_hat": float(q_hat),
                 "temperature": cal["temperature"],
                 "queried_source_weight": float(detail["source_weights"][0, source]),
@@ -1083,7 +1245,7 @@ def live_arena(study_dir: Path, pixels: list[float] | None = None,
             },
         }
     finally:
-        torch.set_num_threads(previous_threads)
+        pass
 
 
 def calibrate_study(study_dir: Path, alpha: float = 0.05, seed: int | None = None) -> dict:
@@ -1098,16 +1260,16 @@ def calibrate_study(study_dir: Path, alpha: float = 0.05, seed: int | None = Non
     if seed is not None and seed not in config.seeds:
         raise ValueError("invalid study seed")
     conditions = _conditions(config.protocol)
-    previous_threads = torch.get_num_threads()
-    torch.set_num_threads(config.threads)
     try:
         rows_out = []
+        batch_cache: dict[tuple[int, str], dict] = {}
         for row in summary["rows"]:
             if seed is not None and row["seed"] != seed:
                 continue
             model, split, posteriors, _ = _restore(study_dir, row, config)
             cal = _calibrate_cached(study_dir, row, config, model, split, posteriors)
             q_hat = conformal_quantile(cal["val_scores"], alpha=float(alpha))
+            crc_fit = conformal_risk_control(cal["val_probs"], cal["val_targets"], alpha=float(alpha))
             loaded = np.load(safe_artifact(study_dir, row["trace"]), allow_pickle=False)
             cond_metrics = {}
             for cond in conditions:
@@ -1118,7 +1280,10 @@ def calibrate_study(study_dir: Path, alpha: float = 0.05, seed: int | None = Non
                 cal_probs = softmax_temperature(logits, temperature=cal["temperature"])
                 # For common-mode or forensic receiver, evaluate epistemic trust on the batch
                 if model.forensic and cond in ("damage_common", "damage_two", "damage_one", "heldout_independent"):
-                    batch = _batch(posteriors, split, config, row["seed"], cond)
+                    cache_key = (row["seed"], cond)
+                    if cache_key not in batch_cache:
+                        batch_cache[cache_key] = _batch(posteriors, split, config, row["seed"], cond)
+                    batch = batch_cache[cache_key]
                     with torch.no_grad():
                         insp = model.inspect(batch["donors"], batch["query"], batch["context"])
                         ep_trust = insp["epistemic_trust"].cpu().numpy()
@@ -1154,6 +1319,14 @@ def calibrate_study(study_dir: Path, alpha: float = 0.05, seed: int | None = Non
                     gamma=0.05, k_reg=1, lam_reg=0.02,
                     epistemic_trust=ep_trust, epistemic_threshold=model.epistemic_threshold,
                 )
+                crc_eval = evaluate_conformal_risk_control(
+                    cal_probs, targets, lambda_crc=crc_fit["lambda_crc"],
+                    k_reg=1, lam_reg=0.02,
+                    epistemic_trust=ep_trust, epistemic_threshold=model.epistemic_threshold,
+                )
+                rc_prof = selective_risk_coverage_profile(
+                    cal_probs, targets, epistemic_trust=ep_trust,
+                )
                 cond_metrics[cond] = {
                     "ece_pre": pre_cal["ece"],
                     "ece_post": post_cal["ece"],
@@ -1166,6 +1339,13 @@ def calibrate_study(study_dir: Path, alpha: float = 0.05, seed: int | None = Non
                     "wcp_mean_set_size": wcp_eval["wcp_mean_set_size"],
                     "aci_marginal_coverage": aci_eval["marginal_coverage"],
                     "aci_mean_set_size": aci_eval["mean_set_size"],
+                    "crc_expected_loss": crc_eval["crc_expected_loss"],
+                    "crc_marginal_coverage": crc_eval["crc_marginal_coverage"],
+                    "crc_empirical_coverage": crc_eval["crc_marginal_coverage"],
+                    "crc_mean_set_size": crc_eval["crc_mean_set_size"],
+                    "aurc": rc_prof["aurc"],
+                    "oracle_aurc": rc_prof["oracle_aurc"],
+                    "e_aurc": rc_prof["e_aurc"],
                 }
             loaded.close()
             rows_out.append({
@@ -1173,6 +1353,7 @@ def calibrate_study(study_dir: Path, alpha: float = 0.05, seed: int | None = Non
                 "arm": row["arm"],
                 "temperature": cal["temperature"],
                 "q_hat": float(q_hat),
+                "crc_lambda": float(crc_fit["lambda_crc"]),
                 "conditions": cond_metrics,
             })
 
@@ -1192,6 +1373,7 @@ def calibrate_study(study_dir: Path, alpha: float = 0.05, seed: int | None = Non
             by_arm[arm_name] = {
                 "mean_temperature": round(float(np.mean([r["temperature"] for r in arm_rows])), 5),
                 "mean_q_hat": round(float(np.mean([r["q_hat"] for r in arm_rows])), 5),
+                "crc_lambda": round(float(np.mean([r["crc_lambda"] for r in arm_rows])), 5),
                 "seeds": [r["seed"] for r in arm_rows],
                 "conditions": agg_conds,
             }
@@ -1204,4 +1386,4 @@ def calibrate_study(study_dir: Path, alpha: float = 0.05, seed: int | None = Non
             "summary_by_arm": by_arm,
         }
     finally:
-        torch.set_num_threads(previous_threads)
+        pass

@@ -73,6 +73,25 @@ A white-box **Stealth Decoy-Spike Adversary (`stealth_1..3`)** that places $88\%
 
 In v0.6, `TetherReceiver.pid_decomposition` decomposes point-wise directed target information $I(S; y^*) = \max(0, \log(p^{(S)}_{y^*} / p^{(\emptyset)}_{y^*}))$ across the $2^3 = 8$ specialist coalitions into non-negative Shared Redundancy ($R_{\text{shared}}$), Unique Specialist Information ($U_0, U_1, U_2$), and Coalitional Circuit Synergy ($S_{\text{syn}}$). `TetherReceiver.causal_mediation` separates Visual Natural Direct Effect ($\text{NDE}_{\text{visual}}$) from Context Shortcut Natural Indirect Effect ($\text{NIE}_{\text{shortcut}}$) and computes the exact Critical Breakdown Threshold $\alpha^*_{\text{crit}}$. Finally, `weighted_conformal_prediction_sets` reweights calibration nonconformity scores by exponential conflict likelihood ratios $w(x) = \exp(\beta d_{\text{shift}}(x))$, and `helmholtz_free_energy_forensics` evaluates runner-up tail Helmholtz free energy $E_{\text{tail}}(P_{s,e}; T)$ and inverse participation ratio $N_{\text{eff}} \in [1, 9]$.
 
+### Rao (1945), Amari (2016), Nielsen (2019), Angelopoulos et al. (2024) & Geifman & El-Yaniv (2017): Riemannian Information Geometry, Tangent-Space Certified TV Robustness, Conformal Risk Control & Selective Classification (v0.7)
+
+- [Information and the Accuracy Attainable in the Estimation of Statistical Parameters](https://doi.org/10.1007/978-1-4612-0919-5_16), Bulletin of the Calcutta Mathematical Society 1945, 37:81–91. Author: C. Radhakrishna Rao.
+- *Information Geometry and Its Applications*, Springer 2016. Author: Shun-ichi Amari.
+- [An Elementary Introduction to Information Geometry](https://arxiv.org/abs/1904.10421), Entropy 2020, 22(10):1100. Author: Frank Nielsen.
+- [Conformal Risk Control](https://arxiv.org/abs/2208.02814), ICLR 2024. Authors: Anastasios N. Angelopoulos, Stephen Bates, Adam Fisch, Lihua Lei and Tal Schuster.
+- [Selective Classification for Deep Neural Networks](https://arxiv.org/abs/1705.08500), NeurIPS 2017. Authors: Yonatan Geifman and Ran El-Yaniv.
+
+In v0.7, `TetherReceiver.information_geometry` maps specialist posteriors $p_{s,e} \in \Delta^9$ onto the positive orthant of the unit sphere $S^9_+$ via $\psi(p) = \sqrt{p}$, computing exact Fisher–Rao geodesic distances $d_{\text{FR}}(p, q) = 2\arccos(\sum_c \sqrt{p_c q_c}) \in [0, \pi]$, Bhattacharyya coefficients $\text{BC}(p, q)$, Hellinger distances $d_H(p, q)$, the spherical Fréchet/Karcher barycenter $\mu_{\text{FR}}$, and geodesic variance suppression ($\sigma^2_{\text{FR,unweighted}} \to \sigma^2_{\text{FR,routed}}$). `TetherReceiver.tangent_jacobian_robustness` projects the top-1 vs. runner-up margin gradient onto the zero-sum simplex tangent space $T\Delta^9$, computing the dual $\ell_\infty$-span sensitivity $\max_c g^{\text{tan}}_c - \min_c g^{\text{tan}}_c$ to certify the first-order Total-Variation robustness radius $r^{\text{TV}}_{\text{cert}}(s, e) \in [0, 1]$. Finally, `conformal_risk_control` and `selective_risk_coverage_profile` provide finite-sample monotone risk control $\mathbb{E}[L_{n+1}(\hat{\lambda}_{\text{CRC}})] \le \alpha$ and exact Risk–Coverage AURC / E-AURC profiles.
+
+### Simplex vertex breakdown profile & non-linear coalition perturbations (v0.8)
+
+- [Robust Optimization on the Probability Simplex](https://arxiv.org/abs/2105.08008), SIAM Journal on Optimization 2021. Authors: Dimitris Bertsimas and Melvyn Sim.
+- [Adversarial Robustness Guarantees for Neural Networks on Probability Distributions](https://arxiv.org/abs/2006.13627), ICML 2020. Authors: J. Zico Kolter and Eric Wong.
+
+While first-order tangent-space sensitivity $\|P_{\text{tan}}\nabla\gamma\|_{\text{span}}$ certifies a local Total-Variation radius $r^{\text{TV}}_{\text{cert}}$ via linearization, complex deep neural receivers have non-linear routing decisions that can saturate or exhibit threshold behaviors away from the immediate tangent hyperplane. In v0.8, `TetherReceiver.vertex_breakdown_radius` constructs an exact empirical counter-bound by evaluating straight-line simplex perturbation paths $p_e(t) = (1 - t) p_e + t e_c$ toward all 10 simplex vertices across all 7 specialist coalitions $\mathcal{C} \in \{\{0\}, \{1\}, \{2\}, \{0,1\}, \{0,2\}, \{1,2\}, \{0,1,2\}\}$. Coarse grid evaluation followed by bisection guarantees that every reported breakdown radius $\delta_{\text{TV}}^{\text{break}}$ is attained by a verified prediction-flipping adversarial perturbation. This forms the exact robustness sandwich:
+$$r^{\text{TV}}_{\text{cert}} \le \delta_{\text{TV}}^{\text{minimal}} \le \delta_{\text{TV}}^{\text{break}}$$
+proving that Tether's singletons $\{0\}, \{1\}, \{2\}$ on clean inputs are completely immune to single-specialist vertex attacks, while pair coalitions require a substantial TV budget ($\ge 0.716$), and the grand coalition $\{0,1,2\}$ flips at $\delta_{\text{TV}} \approx 0.493$.
+
 ## Current context: useful lessons, different implemented mechanisms
 
 | Primary source and checked version | Source-level observation | Consequence for Tether |

@@ -37,6 +37,8 @@ def make_server(study_dir: str | Path, host: str = "127.0.0.1",
     """Create a read-only local server without starting its event loop."""
     _loopback_host(host)
     study = Path(study_dir).resolve()
+    if (study / "checkpoints").exists():
+        import tether.experiment  # noqa: F401 - preload torch/sklearn on main thread
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, format, *args):
@@ -362,8 +364,7 @@ def make_server(study_dir: str | Path, host: str = "127.0.0.1",
         do_PATCH = do_POST
         do_DELETE = do_POST
 
-    class LocalServer(ThreadingHTTPServer):
-        daemon_threads = True
+    class LocalServer(HTTPServer):
         if ":" in host:
             address_family = socket.AF_INET6
 

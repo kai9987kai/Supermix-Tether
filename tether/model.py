@@ -671,6 +671,248 @@ class TetherReceiver(nn.Module):
             "immune": immune,
         }
 
+    def information_geometry(self, donors, query, context):
+        """Compute Riemannian Information Geometry on the probability simplex (Rao 1945; Amari 2016; Nielsen 2019).
+
+        Embeds each specialist posterior p_{s,e} in Delta^9 onto the positive orthant of the
+        unit hypersphere via the square-root map sqrt(p_{s,e}) and computes:
+          - fisher_rao_matrix: [B, 3_sources, 3_experts, 3_experts] exact geodesic arc distances
+            d_FR(p, q) = 2 * arccos(sum_c sqrt(p_c * q_c)) in [0, pi].
+          - bhattacharyya_matrix: [B, 3, 3, 3] Bhattacharyya coefficients BC(p, q) in [0, 1].
+          - hellinger_matrix: [B, 3, 3, 3] Hellinger chord distances sqrt(1 - BC(p, q)) in [0, 1].
+          - frechet_barycenter: [B, 3, 10] reliability-weighted spherical Karcher/Frechet mean.
+          - unweighted_frechet_variance: [B, 3] unweighted specialist geodesic dispersion.
+          - routed_frechet_variance: [B, 3] reliability-weighted geodesic dispersion.
+          - geodesic_suppression_ratio: [B, 3] fraction of geodesic conflict suppressed by routing.
+        """
+        _inputs(donors, query, context)
+        dtype = self.task_matrices.dtype
+        p = donors.detach().to(dtype=dtype).clamp_min(1e-8)
+        p = p / p.sum(dim=-1, keepdim=True)
+        c_tensor = context.detach().to(dtype=dtype)
+
+        with torch.no_grad():
+            detail = self._compute(p, query, c_tensor, detach_donors=True)
+            weights = detail["expert_weights"]  # [B, 3, 3]
+            sqrt_p = p.sqrt()  # [B, 3, 3, 10]
+
+            # Pairwise Bhattacharyya coefficient BC(e_i, e_j) = sum_c sqrt(p_{i,c} p_{j,c})
+            bc = torch.einsum("bsic,bsjc->bsij", sqrt_p, sqrt_p).clamp(0.0, 1.0)
+            eye = torch.eye(3, device=p.device, dtype=dtype).unsqueeze(0).unsqueeze(0)
+            bc = bc * (1.0 - eye) + eye
+            # Exact Fisher-Rao geodesic distance d_FR(p, q) = 2 * arccos(BC)
+            # Clamp inside arccos to 1 - 1e-7 off-diagonal for numerical stability
+            bc_safe = torch.where(eye > 0.5, torch.ones_like(bc), bc.clamp(0.0, 1.0 - 1e-7))
+            fisher_rao = 2.0 * torch.acos(bc_safe) * (1.0 - eye)
+            hellinger = (1.0 - bc).clamp_min(0.0).sqrt() * (1.0 - eye)
+
+            # Unweighted spherical mean and Frechet variance
+            mean_chord_unw = sqrt_p.mean(dim=-2, keepdim=True)  # [B, 3, 1, 10]
+            norm_unw = mean_chord_unw.norm(dim=-1, keepdim=True).clamp_min(1e-8)
+            sphere_unw = mean_chord_unw / norm_unw
+            bc_to_unw = (sqrt_p * sphere_unw).sum(dim=-1).clamp(0.0, 1.0 - 1e-7)
+            dist_to_unw = 2.0 * torch.acos(bc_to_unw)
+            unweighted_var = (dist_to_unw.square()).mean(dim=-1)  # [B, 3]
+
+            # Reliability-weighted spherical Frechet/Karcher barycenter
+            mean_chord_w = (weights.unsqueeze(-1) * sqrt_p).sum(dim=-2, keepdim=True)  # [B, 3, 1, 10]
+            norm_w = mean_chord_w.norm(dim=-1, keepdim=True).clamp_min(1e-8)
+            sphere_w = mean_chord_w / norm_w
+            frechet_barycenter = sphere_w.squeeze(-2).square()
+            frechet_barycenter = frechet_barycenter / frechet_barycenter.sum(dim=-1, keepdim=True)
+
+            bc_to_w = (sqrt_p * sphere_w).sum(dim=-1).clamp(0.0, 1.0 - 1e-7)
+            dist_to_w = 2.0 * torch.acos(bc_to_w)
+            # Zero out distance when a single specialist has >0.9999 weight on itself
+            routed_var = (weights * dist_to_w.square()).sum(dim=-1)
+            suppression = (1.0 - routed_var / unweighted_var.clamp_min(1e-6)).clamp(0.0, 1.0)
+
+        return {
+            "fisher_rao_matrix": fisher_rao,
+            "bhattacharyya_matrix": bc,
+            "hellinger_matrix": hellinger,
+            "frechet_barycenter": frechet_barycenter,
+            "unweighted_frechet_variance": unweighted_var,
+            "routed_frechet_variance": routed_var,
+            "geodesic_suppression_ratio": suppression,
+        }
+
+    def tangent_jacobian_robustness(self, donors, query, context, target=None):
+        """Simplex tangent-space margin sensitivity and a first-order (linearized) TV radius.
+
+        Projects the input gradient of the target vs. runner-up logit margin
+        gamma(P) = z_y - max_{c != y} z_c onto the simplex tangent space
+        T Delta^9 = {v : sum_c v_c = 0} with the Euclidean projection g - mean(g).
+        For any admissible perturbation delta in T Delta^9 with total variation
+        ||delta||_TV = 0.5 ||delta||_1 = rho, the first-order margin change obeys
+        |<g_tan, delta>| <= rho * (max_c g_tan_c - min_c g_tan_c), so the span
+        semi-norm is the exact dual of TV on T Delta^9 and
+        r_lin = gamma / span(g_tan) is the radius at which the *linearized* margin
+        can reach zero. It is an estimate, not a certificate: the receiver is
+        nonlinear, so the true flipping radius can be larger or smaller. Compare
+        it with `vertex_breakdown_radius`, which evaluates real perturbations.
+
+        Also reports the Fisher-Rao (natural-gradient) sensitivity
+        ||grad gamma||_{G^{-1}} = sqrt(sum_c p_c (g_c - <p, g>)^2) (Amari 1998) as
+        a geometry-aware descriptor. It is not used for the TV radius.
+        """
+        _inputs(donors, query, context)
+        if donors.device != self.task_matrices.device:
+            raise ValueError("input tensors and receiver must be on the same device")
+        dtype = self.task_matrices.dtype
+        b_size = donors.shape[0]
+        device = donors.device
+
+        with torch.enable_grad():
+            p = donors.detach().to(dtype=dtype).clone().requires_grad_(True)
+            c_tensor = context.detach().to(dtype=dtype)
+            detail = self._compute(p, query, c_tensor, detach_donors=False)
+            logits = detail["logits"]
+
+            if target is None:
+                chosen_target = logits.argmax(dim=-1)
+            else:
+                _target(target, "target", b_size, device)
+                chosen_target = target
+
+            rows = torch.arange(b_size, device=device)
+            target_logits = logits[rows, chosen_target]
+            masked = logits.clone()
+            masked[rows, chosen_target] = -1e9
+            runner_up_logits = masked.max(dim=-1).values
+            margin = target_logits - runner_up_logits
+
+            grads = torch.autograd.grad(margin.sum(), p, create_graph=False)[0]
+
+        # Euclidean projection onto T Delta^9 in float64 so rows sum to zero to ~1e-12
+        # even when boundary entropy features make raw gradients O(10^3).
+        p64 = p.detach().to(torch.float64)
+        g64 = torch.nan_to_num(grads.detach().to(torch.float64), nan=0.0, posinf=0.0, neginf=0.0)
+        grads_tan64 = g64 - g64.mean(dim=-1, keepdim=True)
+        span64 = grads_tan64.max(dim=-1).values - grads_tan64.min(dim=-1).values
+        l2_64 = grads_tan64.norm(dim=-1)
+        nat64 = g64 - (p64 * g64).sum(dim=-1, keepdim=True)
+        fisher_rao_norm = (p64 * nat64.square()).sum(dim=-1).sqrt()
+
+        pos_margin = margin.detach().to(torch.float64).clamp_min(0.0)[:, None, None]
+        lin_radius = (pos_margin / span64.clamp_min(1e-12)).clamp(0.0, 1.0)
+
+        return {
+            "target": chosen_target.detach(),
+            "logit_margin": margin.detach(),
+            "tangent_gradients": grads_tan64,
+            "tangent_span_sensitivity": span64,
+            "tangent_l2_sensitivity": l2_64,
+            "fisher_rao_sensitivity": fisher_rao_norm,
+            "certified_tv_radius": lin_radius,
+            "first_order_tv_radius": lin_radius,
+        }
+
+    COALITIONS = ((0,), (1,), (2,), (0, 1), (0, 2), (1, 2), (0, 1, 2))
+
+    @torch.no_grad()
+    def vertex_breakdown_radius(self, donors, query, context, target=None,
+                                grid_points: int = 33, refine_steps: int = 14):
+        """Empirical adversarial breakdown radius along simplex vertex paths.
+
+        For every specialist coalition C at the queried source (7 non-empty subsets
+        of {0, 1, 2}) and every class vertex e_c, moves each member posterior along
+        the straight simplex path p_e(t) = (1 - t) p_e + t e_c and finds the
+        smallest t at which the receiver's top-1 prediction leaves the target
+        (coarse grid, then bisection that always keeps a verified flipping point).
+        The per-specialist TV budget is TV(p_e, p_e(t)) = t (1 - p_{e,c}), and the
+        coalition budget is the maximum over members.
+
+        Every reported radius is attained by an explicit perturbation that flips
+        the prediction, so it is an upper bound on the true minimal flipping TV
+        radius for that coalition (the attack family is restricted to vertex
+        paths). Coalitions that never flip within the family report NaN.
+
+        Returns tensors over [B, 7 coalitions]:
+          - breakdown_tv: min over vertices of the coalition TV budget at the flip.
+          - breakdown_vertex: the attacking vertex class (-1 when no flip).
+          - adversarial_prediction: receiver prediction at the verified flip point.
+          - flipped: whether any vertex path flips the prediction.
+        and `per_vertex_tv` [B, 7, 10].
+        """
+        _inputs(donors, query, context)
+        if donors.device != self.task_matrices.device:
+            raise ValueError("input tensors and receiver must be on the same device")
+        if grid_points < 3 or refine_steps < 0:
+            raise ValueError("grid_points must be >= 3 and refine_steps >= 0")
+        dtype = self.task_matrices.dtype
+        device = donors.device
+        p = donors.detach().to(dtype=dtype)
+        context = context.detach().to(dtype=dtype)
+        b = p.shape[0]
+        n_coal, n_cls, g = len(self.COALITIONS), 10, int(grid_points)
+        rows = torch.arange(b, device=device)
+        src = query[:, 0]
+
+        base_logits = self._compute(p, query, context)["logits"]
+        chosen = base_logits.argmax(-1) if target is None else target
+        if target is not None:
+            _target(target, "target", b, device)
+
+        mask = torch.zeros(n_coal, 3, dtype=dtype, device=device)
+        for k, coal in enumerate(self.COALITIONS):
+            mask[k, list(coal)] = 1.0
+        vertices = torch.eye(n_cls, dtype=dtype, device=device)
+        p_src = p[rows, src]  # [B, 3, 10]
+
+        def evaluate(t):
+            """t: [B, 7, 10, M] -> predictions [B, 7, 10, M]."""
+            m = t.shape[-1]
+            step = t[..., None, None] * mask[None, :, None, None, :, None]  # [B,7,10,M,3,1]
+            target_v = vertices[None, None, :, None, None, :]                # [1,1,10,1,1,10]
+            pert = p_src[:, None, None, None] + step * (target_v - p_src[:, None, None, None])
+            full = p[:, None, None, None].expand(b, n_coal, n_cls, m, 3, 3, n_cls).clone()
+            for bi in range(b):
+                full[bi, :, :, :, int(src[bi])] = pert[bi]
+            n = b * n_coal * n_cls * m
+            q_rep = query[:, None, None, None, :].expand(b, n_coal, n_cls, m, 2).reshape(n, 2)
+            c_rep = context[:, None, None, None, :].expand(b, n_coal, n_cls, m, n_cls).reshape(n, n_cls)
+            preds = self._compute(full.reshape(n, 3, 3, n_cls), q_rep, c_rep)["logits"].argmax(-1)
+            return preds.reshape(b, n_coal, n_cls, m)
+
+        t_grid = torch.linspace(0.0, 1.0, g, dtype=dtype, device=device)
+        grid_preds = evaluate(t_grid.expand(b, n_coal, n_cls, g))
+        flips = grid_preds != chosen[:, None, None, None]
+        has_flip = flips.any(-1)
+        first = torch.where(has_flip, flips.float().argmax(-1), torch.full_like(has_flip, g - 1, dtype=torch.long))
+        hi = t_grid[first]
+        lo = t_grid[(first - 1).clamp_min(0)]
+        lo = torch.where(first == 0, torch.zeros_like(lo), lo)
+        adv = torch.gather(grid_preds, -1, first[..., None]).squeeze(-1)
+        for _ in range(int(refine_steps)):
+            mid = 0.5 * (lo + hi)
+            mid_pred = evaluate(mid[..., None]).squeeze(-1)
+            mid_flip = (mid_pred != chosen[:, None, None]) & has_flip
+            hi = torch.where(mid_flip, mid, hi)
+            adv = torch.where(mid_flip, mid_pred, adv)
+            lo = torch.where(mid_flip | ~has_flip, lo, mid)
+
+        # Coalition TV budget at the verified flip: max_e in C of t * (1 - p_{e,c})
+        gap = (1.0 - p_src).transpose(1, 2)  # [B, 10, 3]
+        coal_gap = (gap[:, None, :, :] * mask[None, :, None, :]).amax(-1)  # [B, 7, 10]
+        per_vertex = torch.where(has_flip, hi * coal_gap, torch.full_like(hi, float("nan")))
+        safe = torch.where(has_flip, per_vertex, torch.full_like(per_vertex, float("inf")))
+        best_tv, best_v = safe.min(-1)
+        flipped = has_flip.any(-1)
+        best_tv = torch.where(flipped, best_tv, torch.full_like(best_tv, float("nan")))
+        best_adv = torch.gather(adv, -1, best_v[..., None]).squeeze(-1)
+        best_v = torch.where(flipped, best_v, torch.full_like(best_v, -1))
+        best_adv = torch.where(flipped, best_adv, torch.full_like(best_adv, -1))
+        return {
+            "target": chosen,
+            "coalitions": [list(c) for c in self.COALITIONS],
+            "breakdown_tv": best_tv,
+            "breakdown_vertex": best_v,
+            "adversarial_prediction": best_adv,
+            "flipped": flipped,
+            "per_vertex_tv": per_vertex,
+        }
+
     def forward(self, donors, query, context):
         return self.inspect(donors, query, context)["logits"]
 
